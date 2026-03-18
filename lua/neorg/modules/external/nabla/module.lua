@@ -90,9 +90,9 @@ end
 --- numbers, operators, and delimiters are upright (normal weight).
 ---
 --- Type → highlight group (default style):
----   "var"                    → NeorgNablaVar        (italic      — Greek letters / special vars)
+---   "var"                   → NeorgNablaVar        (italic      — Greek letters / special vars)
 ---   "sym" (single-char α)   → NeorgNablaSym        (italic      — variable names)
----   "sym" (multi-char α)    → NeorgNablaFun        (bold        — named functions: cos, sin …)
+---   "sym" (multi-char α)    → NeorgNablaFun        (normal      — named functions: cos, sin …)
 ---   "sym" (numeric)         → NeorgNablaNumber     (normal      — numeric symbols)
 ---   "sym" (other)           → NeorgNablaOperator   (normal      — operator-like, may span rows)
 ---   "num"                   → NeorgNablaNumber     (normal      — numbers)
@@ -121,7 +121,7 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
         local off = (dy == 0) and first_dx or dx
         if g.content and g.content[1] and string.match(g.content[1], "^%a") then
             if g.w > 1 then
-                -- Multi-character alphabetic: named function (cos, sin, …) → bold/upright
+                -- Multi-character alphabetic: named function (cos, sin, …) → upright
                 for i = 1, g.w do
                     if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
                         virt_lines[dy + 1][off + i][2] = "NeorgNablaFun"
@@ -1053,13 +1053,13 @@ module.load = function()
     -- Define highlight groups for LaTeX-style rendering.  Each nabla grid node
     -- type has its own group so users can customise them independently.
     -- The defaults follow standard LaTeX math-mode conventions: variables and
-    -- Greek letters are italic; named functions (cos, sin, …) are bold;
+    -- Greek letters are italic; named functions (cos, sin, …) are upright;
     -- \mathbf is bold; \boldsymbol is bold+italic; numbers, operators, and
     -- delimiters are upright.
     -- Using `default = true` so users can override with their own styles.
     vim.api.nvim_set_hl(0, "NeorgNablaVar",        { italic = true, default = true })
     vim.api.nvim_set_hl(0, "NeorgNablaSym",        { italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaFun",        { bold = true,   default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaFun",        { default = true })
     vim.api.nvim_set_hl(0, "NeorgNablaBold",       { bold = true,   default = true })
     vim.api.nvim_set_hl(0, "NeorgNablaBoldItalic", { bold = true, italic = true, default = true })
     vim.api.nvim_set_hl(0, "NeorgNablaNumber",     { default = true })
