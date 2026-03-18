@@ -112,6 +112,10 @@ local function get_ts_conceal_ranges(buf, row)
             if srow == row and erow == row then
                 local rep = ""
                 if metadata then
+                    -- Neovim stores #set! conceal metadata at different
+                    -- levels depending on the query structure and version:
+                    -- capture-level (metadata[id].conceal) or match-level
+                    -- (metadata.conceal).  Check both.
                     if type(metadata[id]) == "table" and metadata[id].conceal then
                         rep = metadata[id].conceal
                     elseif metadata.conceal then
