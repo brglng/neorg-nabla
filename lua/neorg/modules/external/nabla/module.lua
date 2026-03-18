@@ -96,6 +96,67 @@ local function place_conceal_extmarks(buf, ns, row, scol, width, chars)
     end
 end
 
+--- Compute the 0-indexed visual (display) column of buffer byte position
+--- `byte_col` on `row` in `buf`, accounting for conceal extmarks from
+--- every namespace.  This is independent of screen/window state and gives
+--- correct results even when other modules apply conceal extmarks (e.g.
+--- neorg's core.concealer for bold/italic markers).
+local function visual_col_with_conceal(buf, row, byte_col, line_text)
+    if byte_col <= 0 then
+        return 0
+    end
+
+    -- Collect conceal extmarks from ALL namespaces on this row.
+    local marks = vim.api.nvim_buf_get_extmarks(buf, -1, { row, 0 }, { row, -1 }, {
+        details = true,
+    })
+
+    -- Filter for conceal ranges that overlap with [0, byte_col).
+    local ranges = {}
+    for _, mark in ipairs(marks) do
+        local details = mark[4]
+        if details.conceal ~= nil then
+            local s = mark[3]
+            local e = details.end_col
+            if e and s < byte_col then
+                e = math.min(e, byte_col)
+                if e > s then
+                    table.insert(ranges, { s = s, e = e, rep = details.conceal })
+                end
+            end
+        end
+    end
+
+    if #ranges == 0 then
+        return vim.fn.strdisplaywidth(line_text:sub(1, byte_col))
+    end
+
+    -- Sort by start position; for equal starts, prefer the longer range.
+    table.sort(ranges, function(a, b)
+        if a.s ~= b.s then return a.s < b.s end
+        return a.e > b.e
+    end)
+
+    -- Build the visual string by replacing concealed byte ranges with their
+    -- replacement characters.  Skip overlapping ranges (first-wins).
+    local parts = {}
+    local pos = 0
+    for _, r in ipairs(ranges) do
+        if r.s >= pos then
+            if r.s > pos then
+                table.insert(parts, line_text:sub(pos + 1, r.s))
+            end
+            table.insert(parts, r.rep)
+            pos = r.e
+        end
+    end
+    if pos < byte_col then
+        table.insert(parts, line_text:sub(pos + 1, byte_col))
+    end
+
+    return vim.fn.strdisplaywidth(table.concat(parts))
+end
+
 --- Parse the LaTeX `content` with nabla and return the ASCII drawing table,
 --- or `nil` on any failure.  Errors are swallowed so bad formulas are silently
 --- skipped.
@@ -224,39 +285,16 @@ local function render_inline_group(buf, entries)
         return
     end
 
-    -- ── compute visual column for each formula BEFORE placing extmarks ─
-    -- screenpos() is called before nabla's own conceal extmarks exist, so
-    -- it reflects positions with only other modules' concealing applied
-    -- (fixes misalignment when bold/italic/etc. conceal is active).
-    -- The total visual-column offset from line start – including any
-    -- wrapped-row contribution – is used as padding so that virt_lines
-    -- wrap at the same window width and land at the correct column even
-    -- on long wrapped lines.
-    local win = vim.fn.bufwinid(buf)
-    local wi = win > 0 and vim.fn.getwininfo(win)[1] or nil
-    local text_width
-    if wi then
-        text_width = wi.width - wi.textoff
-    end
-
+    -- ── compute visual column for each formula ──────────────────────────
+    -- Compute the 0-indexed visual column of each formula start,
+    -- accounting for conceal extmarks from other modules (e.g. neorg's
+    -- core.concealer that hides bold/italic markers).  This reads
+    -- extmark metadata directly from the buffer and is independent of
+    -- screen/window state, so it is reliable regardless of redraw timing.
+    -- Wrapped long lines are intentionally not supported because Neovim
+    -- cannot insert virtual lines between wrapped screen lines.
     for _, v in ipairs(valid) do
-        v.pre_col = nil
-        if win > 0 and wi and text_width and text_width > 0 then
-            local sp = vim.fn.screenpos(win, srow + 1, v.scol + 1)
-            if sp.col > 0 and sp.row > 0 then
-                local line_start = vim.fn.screenpos(win, srow + 1, 1)
-                if line_start.row > 0 then
-                    local wrap_delta = sp.row - line_start.row
-                    local col_in_row = sp.col - wi.wincol - wi.textoff
-                    if col_in_row >= 0 then
-                        v.pre_col = wrap_delta * text_width + col_in_row
-                    end
-                end
-            end
-        end
-        if not v.pre_col then
-            v.pre_col = vim.fn.strdisplaywidth(line_text:sub(1, v.scol))
-        end
+        v.pre_col = visual_col_with_conceal(buf, srow, v.scol, line_text)
     end
 
     -- Post-conceal positions: nabla replaces each formula's source text
