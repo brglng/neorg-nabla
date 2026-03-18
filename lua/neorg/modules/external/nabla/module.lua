@@ -80,22 +80,22 @@ local function make_virt_line(str, hl)
     return vl
 end
 
---- Walk the grid tree produced by nabla.ascii and apply bold/italic highlight
---- groups to virt-line entries following common LaTeX rendering conventions.
+--- Walk the grid tree produced by nabla.ascii and apply highlight groups to
+--- virt-line entries following common LaTeX rendering conventions.
 ---
---- In LaTeX math mode, variables and Greek letters are set in italic, while
---- numbers, named operators, and delimiters are upright (bold).  This mirrors
---- the structure of nabla.nvim's `colorize_virt` but uses formatting
---- (bold/italic) rather than syntax-highlight colours.
+--- Each nabla grid node type maps to its own highlight group so that users
+--- can customise them independently.  The defaults follow standard LaTeX
+--- math-mode conventions: variables and Greek letters are *italic*, while
+--- numbers, operators, and delimiters are upright (normal weight).
 ---
---- Type → highlight mapping:
----   "var"               → NeorgNablaItalic   (Greek letters / special vars)
----   "sym" (alphabetic)  → NeorgNablaItalic   (variable names)
----   "sym" (numeric)     → NeorgNablaBold     (numeric symbols)
----   "sym" (other)       → NeorgNablaBold     (operator-like, may span rows)
----   "num"               → NeorgNablaBold     (numbers)
----   "op"                → NeorgNablaBold     (multi-row operators)
----   "par"               → NeorgNablaBold     (parentheses/brackets)
+--- Type → highlight group (default style):
+---   "var"               → NeorgNablaVar        (italic — Greek letters / special vars)
+---   "sym" (alphabetic)  → NeorgNablaSym        (italic — variable names)
+---   "sym" (numeric)     → NeorgNablaNumber     (normal — numeric symbols)
+---   "sym" (other)       → NeorgNablaOperator   (normal — operator-like, may span rows)
+---   "num"               → NeorgNablaNumber     (normal — numbers)
+---   "op"                → NeorgNablaOperator   (normal — multi-row operators)
+---   "par"               → NeorgNablaDelimiter  (normal — parentheses/brackets)
 ---
 ---@param g          table   grid object from nabla.ascii.to_ascii
 ---@param virt_lines table   array of virt-line arrays (1-indexed rows of {char, hl} tuples)
@@ -107,7 +107,7 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
         local off = (dy == 0) and first_dx or dx
         for i = 1, g.w do
             if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
-                virt_lines[dy + 1][off + i][2] = "NeorgNablaBold"
+                virt_lines[dy + 1][off + i][2] = "NeorgNablaNumber"
             end
         end
     end
@@ -118,23 +118,23 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
             -- Alphabetic symbols (variables) → italic
             for i = 1, g.w do
                 if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
-                    virt_lines[dy + 1][off + i][2] = "NeorgNablaItalic"
+                    virt_lines[dy + 1][off + i][2] = "NeorgNablaSym"
                 end
             end
         elseif g.content and g.content[1] and string.match(g.content[1], "^%d") then
-            -- Numeric symbols → bold
+            -- Numeric symbols → normal (upright in LaTeX)
             for i = 1, g.w do
                 if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
-                    virt_lines[dy + 1][off + i][2] = "NeorgNablaBold"
+                    virt_lines[dy + 1][off + i][2] = "NeorgNablaNumber"
                 end
             end
         else
-            -- Operator-like symbols (may span multiple rows) → bold
+            -- Operator-like symbols (may span multiple rows) → normal (upright in LaTeX)
             for y = 1, g.h do
                 local row_off = (y + dy == 1) and first_dx or dx
                 for i = 1, g.w do
                     if virt_lines[dy + y] and virt_lines[dy + y][row_off + i] then
-                        virt_lines[dy + y][row_off + i][2] = "NeorgNablaBold"
+                        virt_lines[dy + y][row_off + i][2] = "NeorgNablaOperator"
                     end
                 end
             end
@@ -146,7 +146,7 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
             local off = (y + dy == 1) and first_dx or dx
             for i = 1, g.w do
                 if virt_lines[dy + y] and virt_lines[dy + y][off + i] then
-                    virt_lines[dy + y][off + i][2] = "NeorgNablaBold"
+                    virt_lines[dy + y][off + i][2] = "NeorgNablaOperator"
                 end
             end
         end
@@ -157,7 +157,7 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
             local off = (y + dy == 1) and first_dx or dx
             for i = 1, g.w do
                 if virt_lines[dy + y] and virt_lines[dy + y][off + i] then
-                    virt_lines[dy + y][off + i][2] = "NeorgNablaBold"
+                    virt_lines[dy + y][off + i][2] = "NeorgNablaDelimiter"
                 end
             end
         end
@@ -168,7 +168,7 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
         local off = (dy == 0) and first_dx or dx
         for i = 1, g.w do
             if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
-                virt_lines[dy + 1][off + i][2] = "NeorgNablaItalic"
+                virt_lines[dy + 1][off + i][2] = "NeorgNablaVar"
             end
         end
     end
@@ -884,10 +884,16 @@ module.load = function()
     module.private.formula_ranges = {}
     module.private.last_cursor_row = {}
 
-    -- Define highlight groups for LaTeX-style bold/italic rendering.
-    -- Using `default = true` so users can override these with their own colours.
-    vim.api.nvim_set_hl(0, "NeorgNablaItalic", { italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaBold", { bold = true, default = true })
+    -- Define highlight groups for LaTeX-style rendering.  Each nabla grid node
+    -- type has its own group so users can customise them independently.
+    -- The defaults follow standard LaTeX math-mode conventions: variables and
+    -- Greek letters are italic; numbers, operators, and delimiters are upright.
+    -- Using `default = true` so users can override with their own styles.
+    vim.api.nvim_set_hl(0, "NeorgNablaVar",       { italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaSym",       { italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaNumber",    { default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaOperator",  { default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaDelimiter", { default = true })
 
     -- Register the autocommands neorg should forward to us
     module.required["core.autocommands"].enable_autocommand("BufWinEnter")
