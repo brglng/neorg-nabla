@@ -84,9 +84,18 @@ end
 --- groups to virt-line entries following common LaTeX rendering conventions.
 ---
 --- In LaTeX math mode, variables and Greek letters are set in italic, while
---- numbers, named operators, and delimiters are upright.  This mirrors the
---- structure of nabla.nvim's `colorize_virt` but uses formatting (bold/italic)
---- rather than syntax-highlight colours.
+--- numbers, named operators, and delimiters are upright (bold).  This mirrors
+--- the structure of nabla.nvim's `colorize_virt` but uses formatting
+--- (bold/italic) rather than syntax-highlight colours.
+---
+--- Type → highlight mapping:
+---   "var"               → NeorgNablaItalic   (Greek letters / special vars)
+---   "sym" (alphabetic)  → NeorgNablaItalic   (variable names)
+---   "sym" (numeric)     → NeorgNablaBold     (numeric symbols)
+---   "sym" (other)       → NeorgNablaBold     (operator-like, may span rows)
+---   "num"               → NeorgNablaBold     (numbers)
+---   "op"                → NeorgNablaBold     (multi-row operators)
+---   "par"               → NeorgNablaBold     (parentheses/brackets)
 ---
 ---@param g          table   grid object from nabla.ascii.to_ascii
 ---@param virt_lines table   array of virt-line arrays (1-indexed rows of {char, hl} tuples)
@@ -94,6 +103,66 @@ end
 ---@param dx         number  column offset on subsequent rows
 ---@param dy         number  row offset
 local function stylize_virt(g, virt_lines, first_dx, dx, dy)
+    if g.t == "num" then
+        local off = (dy == 0) and first_dx or dx
+        for i = 1, g.w do
+            if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
+                virt_lines[dy + 1][off + i][2] = "NeorgNablaBold"
+            end
+        end
+    end
+
+    if g.t == "sym" then
+        local off = (dy == 0) and first_dx or dx
+        if g.content and g.content[1] and string.match(g.content[1], "^%a") then
+            -- Alphabetic symbols (variables) → italic
+            for i = 1, g.w do
+                if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
+                    virt_lines[dy + 1][off + i][2] = "NeorgNablaItalic"
+                end
+            end
+        elseif g.content and g.content[1] and string.match(g.content[1], "^%d") then
+            -- Numeric symbols → bold
+            for i = 1, g.w do
+                if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
+                    virt_lines[dy + 1][off + i][2] = "NeorgNablaBold"
+                end
+            end
+        else
+            -- Operator-like symbols (may span multiple rows) → bold
+            for y = 1, g.h do
+                local row_off = (y + dy == 1) and first_dx or dx
+                for i = 1, g.w do
+                    if virt_lines[dy + y] and virt_lines[dy + y][row_off + i] then
+                        virt_lines[dy + y][row_off + i][2] = "NeorgNablaBold"
+                    end
+                end
+            end
+        end
+    end
+
+    if g.t == "op" then
+        for y = 1, g.h do
+            local off = (y + dy == 1) and first_dx or dx
+            for i = 1, g.w do
+                if virt_lines[dy + y] and virt_lines[dy + y][off + i] then
+                    virt_lines[dy + y][off + i][2] = "NeorgNablaBold"
+                end
+            end
+        end
+    end
+
+    if g.t == "par" then
+        for y = 1, g.h do
+            local off = (y + dy == 1) and first_dx or dx
+            for i = 1, g.w do
+                if virt_lines[dy + y] and virt_lines[dy + y][off + i] then
+                    virt_lines[dy + y][off + i][2] = "NeorgNablaBold"
+                end
+            end
+        end
+    end
+
     if g.t == "var" then
         -- Greek letters / special variables → italic
         local off = (dy == 0) and first_dx or dx
@@ -102,19 +171,7 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
                 virt_lines[dy + 1][off + i][2] = "NeorgNablaItalic"
             end
         end
-    elseif g.t == "sym" then
-        if g.content and g.content[1] and string.match(g.content[1], "^%a") then
-            -- Alphabetic symbols (variables) → italic
-            local off = (dy == 0) and first_dx or dx
-            for i = 1, g.w do
-                if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
-                    virt_lines[dy + 1][off + i][2] = "NeorgNablaItalic"
-                end
-            end
-        end
-        -- Numeric and operator-like symbols stay Normal (upright in LaTeX)
     end
-    -- "num", "op", "par" all stay Normal (upright in LaTeX)
 
     if g.children then
         for _, child in ipairs(g.children) do
@@ -830,6 +887,7 @@ module.load = function()
     -- Define highlight groups for LaTeX-style bold/italic rendering.
     -- Using `default = true` so users can override these with their own colours.
     vim.api.nvim_set_hl(0, "NeorgNablaItalic", { italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaBold", { bold = true, default = true })
 
     -- Register the autocommands neorg should forward to us
     module.required["core.autocommands"].enable_autocommand("BufWinEnter")
