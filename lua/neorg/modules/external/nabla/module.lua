@@ -668,6 +668,24 @@ local function render_inline_group(buf, entries, cursor_col)
     -- of formulas that are not under the cursor.
     local is_cursor_line = cursor_col ~= nil
 
+    -- On the cursor line Neovim reveals conceals (e.g. `$` delimiters
+    -- hidden by tree-sitter @conceal captures) unless `concealcursor`
+    -- includes the current mode.  When conceals are revealed the visual
+    -- columns computed by visual_col_with_conceal are too small — they
+    -- assume the concealed characters are hidden when they are actually
+    -- visible.  In that case, recompute pre_col using raw display widths
+    -- so that the virt_lines (above/below baseline) align correctly with
+    -- the overlay-rendered baselines.
+    if is_cursor_line then
+        local cc = vim.wo.concealcursor or ""
+        local mode_char = vim.api.nvim_get_mode().mode:sub(1, 1):lower()
+        if not cc:find(mode_char, 1, true) then
+            for _, v in ipairs(valid) do
+                v.pre_col = vim.fn.strdisplaywidth(line_text:sub(1, v.scol))
+            end
+        end
+    end
+
     -- Post-conceal positions: nabla replaces each formula's source text
     -- with its rendered baseline (which may differ in width), so every
     -- subsequent formula shifts by the cumulative width difference.
