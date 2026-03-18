@@ -188,73 +188,125 @@ end
 
 -- ─── rendering ────────────────────────────────────────────────────────────────
 
---- Render an inline math node using conceal to hide the formula source and
---- inline `virt_text` to display the rendered drawing at the baseline.
---- Non-math text on the same line is left as-is and shifts naturally, so no
---- width padding or overlay is needed.  Rows above and below the baseline
---- are shown with `virt_lines_above` / `virt_lines` respectively.
+--- Render all inline math nodes that share a single buffer line as a group.
+--- This merges the above- and below-baseline virtual-line rows from every
+--- formula into a single set of virt_lines, so that multiple multi-line
+--- formulas on the same line do not produce redundant blank lines.
 ---
---- The conceal requires `conceallevel >= 2` to take effect.  When the
---- cursor is on the formula line the module skips rendering entirely,
---- revealing the original LaTeX source for editing.
+--- Each formula's baseline is still rendered independently as concealed
+--- source + inline virtual text, which Neovim positions automatically.
+--- The non-baseline rows are combined into shared virt_lines with the
+--- correct horizontal spacing.
 ---
----@param buf    number  buffer handle
----@param node   userdata  TSNode for the inline_math
----@param content string  stripped LaTeX content (no Neorg markers)
-local function render_inline(buf, node, content)
-    local drawing = gen_drawing(content)
-    if not drawing then
+---@param buf     number  buffer handle
+---@param entries table   list of {node=TSNode, content=string}, sorted by column
+local function render_inline_group(buf, entries)
+    local srow = select(1, entries[1].node:range())
+    local line_text = vim.api.nvim_buf_get_lines(buf, srow, srow + 1, false)[1] or ""
+
+    -- Generate drawings and collect valid (successfully parsed) entries.
+    local valid = {}
+    for _, entry in ipairs(entries) do
+        local drawing = gen_drawing(entry.content)
+        if drawing then
+            local _, scol, _, ecol = entry.node:range()
+            table.insert(valid, {
+                node = entry.node,
+                drawing = drawing,
+                main_row = (drawing._g.my or 0),
+                scol = scol,
+                ecol = ecol,
+                baseline = drawing[(drawing._g.my or 0) + 1] or "",
+            })
+        end
+    end
+    if #valid == 0 then
         return
     end
 
-    local g = drawing._g
-    local main_row = g.my or 0 -- 0-indexed row in drawing that aligns with source line
+    -- ── place conceal + baseline inline virt_text for each formula ──────
+    for _, v in ipairs(valid) do
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
+            end_row = srow,
+            end_col = v.ecol,
+            conceal = "",
+            strict = false,
+            undo_restore = false,
+            invalidate = true,
+        })
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
+            virt_text = make_virt_line(v.baseline),
+            virt_text_pos = "inline",
+            strict = false,
+            undo_restore = false,
+            invalidate = true,
+        })
+    end
 
-    local srow, scol, _, ecol = node:range()
-
-    -- Compute a padding prefix so that virt_lines above/below the baseline
-    -- are horizontally aligned with the rendered math at scol.
-    --
-    -- We prefer screenpos() because it accounts for conceal and virtual text
-    -- from other modules (e.g. Neorg's own concealer hides bold `*` markers).
-    -- The baseline uses virt_text_pos="inline" which Neovim positions
-    -- correctly, but virt_lines always start at column 0 of the text area
-    -- and need a manual space prefix.
-    local prefix_width
+    -- ── compute visual column for each formula in virt_lines ───────────
+    -- First formula: use screenpos() (accounts for other modules' conceal)
+    -- with a strdisplaywidth fallback for off-screen / wrapped lines.
+    local first_prefix
     local win = vim.fn.bufwinid(buf)
     if win > 0 then
-        -- screenpos uses 1-indexed lnum and col
-        local sp = vim.fn.screenpos(win, srow + 1, scol + 1)
+        local sp = vim.fn.screenpos(win, srow + 1, valid[1].scol + 1)
         if sp.col > 0 then
             local wi = vim.fn.getwininfo(win)[1]
             if wi then
-                -- Detect line wrapping: if the formula is on a continuation
-                -- line, screenpos gives the wrapped column which won't match
-                -- the virt_lines layout.  Fall back in that case.
                 local line_start = vim.fn.screenpos(win, srow + 1, 1)
                 if line_start.row > 0 and sp.row == line_start.row then
                     local vcol = sp.col - wi.wincol - wi.textoff
                     if vcol >= 0 then
-                        prefix_width = vcol
+                        first_prefix = vcol
                     end
                 end
             end
         end
     end
-    if not prefix_width then
-        -- Fallback for off-screen lines, wrapped lines, or missing window
-        local line_text = vim.api.nvim_buf_get_lines(buf, srow, srow + 1, false)[1] or ""
-        prefix_width = vim.fn.strdisplaywidth(line_text:sub(1, scol))
+    if not first_prefix then
+        first_prefix = vim.fn.strdisplaywidth(line_text:sub(1, valid[1].scol))
     end
-    local prefix = string.rep(" ", prefix_width)
 
-    -- ── rows ABOVE the baseline ──────────────────────────────────────────
-    if main_row > 0 then
+    valid[1].virt_col = first_prefix
+    for i = 2, #valid do
+        local prev = valid[i - 1]
+        local between = line_text:sub(prev.ecol + 1, valid[i].scol)
+        valid[i].virt_col = prev.virt_col
+            + vim.fn.strdisplaywidth(prev.baseline)
+            + vim.fn.strdisplaywidth(between)
+    end
+
+    -- ── determine max rows above / below baseline ──────────────────────
+    local max_above = 0
+    local max_below = 0
+    for _, v in ipairs(valid) do
+        max_above = math.max(max_above, v.main_row)
+        max_below = math.max(max_below, #v.drawing - v.main_row - 1)
+    end
+
+    -- ── build combined above-baseline virt_lines ───────────────────────
+    if max_above > 0 then
         local vlines = {}
-        for r = 1, main_row do -- drawing rows 1..main_row (1-indexed)
-            table.insert(vlines, make_virt_line(prefix .. (drawing[r] or "")))
+        for r = 1, max_above do
+            local parts = {}
+            local cur_col = 0
+            for _, v in ipairs(valid) do
+                -- Align from the bottom: the last above-baseline row of each
+                -- drawing should sit directly above its baseline.
+                local draw_r = r - max_above + v.main_row
+                if draw_r >= 1 and draw_r <= v.main_row then
+                    local text = v.drawing[draw_r] or ""
+                    if v.virt_col > cur_col then
+                        table.insert(parts, string.rep(" ", v.virt_col - cur_col))
+                        cur_col = v.virt_col
+                    end
+                    table.insert(parts, text)
+                    cur_col = cur_col + vim.fn.strdisplaywidth(text)
+                end
+            end
+            table.insert(vlines, make_virt_line(table.concat(parts)))
         end
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol, {
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
             virt_lines = vlines,
             virt_lines_above = true,
             strict = false,
@@ -263,38 +315,27 @@ local function render_inline(buf, node, content)
         })
     end
 
-    -- ── baseline ─────────────────────────────────────────────────────────
-    local main_line = drawing[main_row + 1] or "" -- 1-indexed
-
-    -- Conceal the formula text so only the inline virtual text is visible
-    -- (requires conceallevel >= 2).
-    vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol, {
-        end_row = srow,
-        end_col = ecol,
-        conceal = "",
-        strict = false,
-        undo_restore = false,
-        invalidate = true,
-    })
-
-    -- Place the rendered drawing as inline virtual text at the formula
-    -- position.  The non-math text on the line is left as-is and shifts
-    -- naturally – no width padding or overlay is needed.
-    vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol, {
-        virt_text = make_virt_line(main_line),
-        virt_text_pos = "inline",
-        strict = false,
-        undo_restore = false,
-        invalidate = true,
-    })
-
-    -- ── rows BELOW the baseline ──────────────────────────────────────────
-    if #drawing > main_row + 1 then
+    -- ── build combined below-baseline virt_lines ───────────────────────
+    if max_below > 0 then
         local vlines = {}
-        for r = main_row + 2, #drawing do
-            table.insert(vlines, make_virt_line(prefix .. (drawing[r] or "")))
+        for r = 1, max_below do
+            local parts = {}
+            local cur_col = 0
+            for _, v in ipairs(valid) do
+                local draw_r = v.main_row + 1 + r -- 1-indexed
+                if draw_r <= #v.drawing then
+                    local text = v.drawing[draw_r] or ""
+                    if v.virt_col > cur_col then
+                        table.insert(parts, string.rep(" ", v.virt_col - cur_col))
+                        cur_col = v.virt_col
+                    end
+                    table.insert(parts, text)
+                    cur_col = cur_col + vim.fn.strdisplaywidth(text)
+                end
+            end
+            table.insert(vlines, make_virt_line(table.concat(parts)))
         end
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol, {
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
             virt_lines = vlines,
             strict = false,
             undo_restore = false,
@@ -439,6 +480,9 @@ module.public = {
         local ts = module.required["core.integrations.treesitter"]
 
         -- ── inline math: $...$ and $|...|$ ──────────────────────────────
+        -- Collect entries grouped by line so that multiple formulas on the
+        -- same line share combined virt_lines (no redundant blank rows).
+        local inline_by_line = {}
         ts.execute_query(
             [[(inline_math) @math]],
             function(query, id, node)
@@ -479,10 +523,23 @@ module.public = {
                     return
                 end
 
-                render_inline(buf, node, content)
+                if not inline_by_line[srow] then
+                    inline_by_line[srow] = {}
+                end
+                table.insert(inline_by_line[srow], { node = node, content = content })
             end,
             buf
         )
+
+        -- Render each line's inline math formulas as a group.
+        for _, group in pairs(inline_by_line) do
+            table.sort(group, function(a, b)
+                local _, a_scol = a.node:range()
+                local _, b_scol = b.node:range()
+                return a_scol < b_scol
+            end)
+            render_inline_group(buf, group)
+        end
 
         -- ── @math ... @end blocks ────────────────────────────────────────
         ts.execute_query(
