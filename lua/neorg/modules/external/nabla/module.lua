@@ -42,6 +42,10 @@ module.config.public = {
 
     --- Milliseconds to wait after the last text change before re-rendering.
     debounce_ms = 200,
+
+    --- When true, the `@math` and `@end` tag lines of math blocks are concealed
+    --- (hidden when conceallevel >= 2).  Default is false.
+    conceal_math_tags = false,
 }
 
 module.private = {
@@ -949,6 +953,27 @@ local function render_math_block(buf, node, cursor_inside)
         end
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
             virt_lines = vlines,
+            strict = false,
+            undo_restore = false,
+            invalidate = true,
+        })
+    end
+
+    -- Optionally conceal the @math and @end tag lines as well.
+    -- Uses Neovim 0.11 line-level concealing (`conceal_lines`) so that the
+    -- entire screen row disappears (including line number) rather than just
+    -- hiding the tag text.
+    if module.config.public.conceal_math_tags then
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
+            end_row = srow,
+            conceal_lines = "",
+            strict = false,
+            undo_restore = false,
+            invalidate = true,
+        })
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, erow, 0, {
+            end_row = erow,
+            conceal_lines = "",
             strict = false,
             undo_restore = false,
             invalidate = true,
