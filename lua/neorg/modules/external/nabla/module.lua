@@ -224,6 +224,53 @@ local function render_inline_group(buf, entries)
         return
     end
 
+    -- ── compute visual column for each formula BEFORE placing extmarks ─
+    -- screenpos() is called before nabla's own conceal extmarks exist, so
+    -- it reflects positions with only other modules' concealing applied
+    -- (fixes misalignment when bold/italic/etc. conceal is active).
+    -- The total visual-column offset from line start – including any
+    -- wrapped-row contribution – is used as padding so that virt_lines
+    -- wrap at the same window width and land at the correct column even
+    -- on long wrapped lines.
+    local win = vim.fn.bufwinid(buf)
+    local wi = win > 0 and vim.fn.getwininfo(win)[1] or nil
+    local text_width
+    if wi then
+        text_width = wi.width - wi.textoff
+    end
+
+    for _, v in ipairs(valid) do
+        v.pre_col = nil
+        if win > 0 and wi and text_width and text_width > 0 then
+            local sp = vim.fn.screenpos(win, srow + 1, v.scol + 1)
+            if sp.col > 0 and sp.row > 0 then
+                local line_start = vim.fn.screenpos(win, srow + 1, 1)
+                if line_start.row > 0 then
+                    local wrap_delta = sp.row - line_start.row
+                    local col_in_row = sp.col - wi.wincol - wi.textoff
+                    if col_in_row >= 0 then
+                        v.pre_col = wrap_delta * text_width + col_in_row
+                    end
+                end
+            end
+        end
+        if not v.pre_col then
+            v.pre_col = vim.fn.strdisplaywidth(line_text:sub(1, v.scol))
+        end
+    end
+
+    -- Post-conceal positions: nabla replaces each formula's source text
+    -- with its rendered baseline (which may differ in width), so every
+    -- subsequent formula shifts by the cumulative width difference.
+    local width_delta = 0
+    for _, v in ipairs(valid) do
+        v.virt_col = v.pre_col + width_delta
+        local source_width = vim.fn.strdisplaywidth(
+            line_text:sub(v.scol + 1, v.ecol))
+        width_delta = width_delta
+            + vim.fn.strdisplaywidth(v.baseline) - source_width
+    end
+
     -- ── place conceal + baseline inline virt_text for each formula ──────
     for _, v in ipairs(valid) do
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
@@ -241,39 +288,6 @@ local function render_inline_group(buf, entries)
             undo_restore = false,
             invalidate = true,
         })
-    end
-
-    -- ── compute visual column for each formula in virt_lines ───────────
-    -- First formula: use screenpos() (accounts for other modules' conceal)
-    -- with a strdisplaywidth fallback for off-screen / wrapped lines.
-    local first_prefix
-    local win = vim.fn.bufwinid(buf)
-    if win > 0 then
-        local sp = vim.fn.screenpos(win, srow + 1, valid[1].scol + 1)
-        if sp.col > 0 then
-            local wi = vim.fn.getwininfo(win)[1]
-            if wi then
-                local line_start = vim.fn.screenpos(win, srow + 1, 1)
-                if line_start.row > 0 and sp.row == line_start.row then
-                    local vcol = sp.col - wi.wincol - wi.textoff
-                    if vcol >= 0 then
-                        first_prefix = vcol
-                    end
-                end
-            end
-        end
-    end
-    if not first_prefix then
-        first_prefix = vim.fn.strdisplaywidth(line_text:sub(1, valid[1].scol))
-    end
-
-    valid[1].virt_col = first_prefix
-    for i = 2, #valid do
-        local prev = valid[i - 1]
-        local between = line_text:sub(prev.ecol + 1, valid[i].scol)
-        valid[i].virt_col = prev.virt_col
-            + vim.fn.strdisplaywidth(prev.baseline)
-            + vim.fn.strdisplaywidth(between)
     end
 
     -- ── determine max rows above / below baseline ──────────────────────
