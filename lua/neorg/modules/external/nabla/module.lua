@@ -844,9 +844,14 @@ end
 --- as a `virt_text` overlay; rows below the baseline are placed as
 --- `virt_lines`.  All content lines are concealed (blank at conceallevel >= 2).
 ---
+--- When `cursor_inside` is true the baseline overlay and content-line
+--- concealment are skipped so the original source is visible for editing,
+--- while the virtual lines above/below are kept.
+---
 ---@param buf  number  buffer handle
 ---@param node userdata  TSNode for the ranged_verbatim_tag
-local function render_math_block(buf, node)
+---@param cursor_inside boolean  whether the cursor is currently inside this block
+local function render_math_block(buf, node, cursor_inside)
     local srow, _, erow, _ = node:range()
 
     -- Detect the indentation of the @math tag line so the rendered ASCII art
@@ -903,18 +908,38 @@ local function render_math_block(buf, node)
         })
     end
 
-    -- Baseline → virt_text overlay at content_row (content line is concealed
-    -- so the overlay is the only thing visible there).
-    local main_line_virt = {}
-    vim.list_extend(main_line_virt, make_virt_line(indent))
-    vim.list_extend(main_line_virt, drawing._virt_lines[main_row + 1] or {})
-    vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
-        virt_text = main_line_virt,
-        virt_text_pos = "overlay",
-        strict = false,
-        undo_restore = false,
-        invalidate = true,
-    })
+    -- When the cursor is inside the block, skip the baseline overlay and
+    -- content concealment so the original source text is visible for editing.
+    -- The virtual lines above/below are still rendered.
+    if not cursor_inside then
+        -- Baseline → virt_text overlay at content_row (content line is concealed
+        -- so the overlay is the only thing visible there).
+        local main_line_virt = {}
+        vim.list_extend(main_line_virt, make_virt_line(indent))
+        vim.list_extend(main_line_virt, drawing._virt_lines[main_row + 1] or {})
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
+            virt_text = main_line_virt,
+            virt_text_pos = "overlay",
+            strict = false,
+            undo_restore = false,
+            invalidate = true,
+        })
+
+        -- Conceal each content line (shows as blank when conceallevel >= 2)
+        for r = srow + 1, erow - 1 do
+            local line = vim.api.nvim_buf_get_lines(buf, r, r + 1, false)[1] or ""
+            if #line > 0 then
+                vim.api.nvim_buf_set_extmark(buf, module.private.ns, r, 0, {
+                    end_row = r,
+                    end_col = #line,
+                    conceal = "",
+                    strict = false,
+                    undo_restore = false,
+                    invalidate = true,
+                })
+            end
+        end
+    end
 
     -- Rows below baseline → virt_lines at content_row.
     if #drawing > main_row + 1 then
@@ -932,21 +957,6 @@ local function render_math_block(buf, node)
             undo_restore = false,
             invalidate = true,
         })
-    end
-
-    -- Conceal each content line (shows as blank when conceallevel >= 2)
-    for r = srow + 1, erow - 1 do
-        local line = vim.api.nvim_buf_get_lines(buf, r, r + 1, false)[1] or ""
-        if #line > 0 then
-            vim.api.nvim_buf_set_extmark(buf, module.private.ns, r, 0, {
-                end_row = r,
-                end_col = #line,
-                conceal = "",
-                strict = false,
-                undo_restore = false,
-                invalidate = true,
-            })
-        end
     end
 
     -- Optionally conceal the @math and @end tag lines as well.
@@ -1098,14 +1108,11 @@ module.public = {
                 local srow, _, erow, _ = node:range()
                 table.insert(module.private.formula_ranges[buf], { srow, erow })
 
-                -- Skip rendering when the cursor is inside the block so the
-                -- original content lines are visible (for editing in insert
-                -- mode, or for inspecting in normal mode).
-                if cursor_row and cursor_row >= srow and cursor_row <= erow then
-                    return
-                end
-
-                render_math_block(buf, node)
+                -- When the cursor is inside the block, render the virtual
+                -- lines (above/below) but skip the baseline overlay and
+                -- content concealment so the original source is visible.
+                local cursor_inside = cursor_row ~= nil and cursor_row >= srow and cursor_row <= erow
+                render_math_block(buf, node, cursor_inside)
             end,
             buf
         )
