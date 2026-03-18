@@ -633,8 +633,8 @@ local function render_inline_group(buf, entries, cursor_col)
                 scol = scol,
                 ecol = ecol,
                 baseline = drawing[(drawing._g.my or 0) + 1] or "",
-                -- In normal mode, mark the specific formula the cursor is on
-                -- so its baseline stays as original text (not concealed).
+                -- When cursor_col is provided (normal mode, cursor on this line),
+                -- mark this formula so its baseline stays as original text (not concealed).
                 cursor_on = cursor_col ~= nil
                     and cursor_col >= scol and cursor_col < ecol,
             })
@@ -1173,7 +1173,7 @@ module.load = function()
         end,
     })
     -- InsertEnter needs an unconditional re-render so the mode change
-    -- (normal→insert) immediately switches to insert-mode behaviour
+    -- (normal→insert) immediately switches to insert-mode behavior
     -- (hide virtual lines on cursor line).
     vim.api.nvim_create_autocmd("InsertEnter", {
         group = module.private.aug,
