@@ -291,8 +291,9 @@ local function render_inline_group(buf, entries)
             local parts = {}
             local cur_col = 0
             for _, v in ipairs(valid) do
-                -- Align from the bottom: the last above-baseline row of each
-                -- drawing should sit directly above its baseline.
+                -- Align from the bottom: when r == max_above the
+                -- result must equal v.main_row (the row just above the
+                -- baseline).  Solving: draw_r = r - max_above + v.main_row.
                 local draw_r = r - max_above + v.main_row
                 if draw_r >= 1 and draw_r <= v.main_row then
                     local text = v.drawing[draw_r] or ""
