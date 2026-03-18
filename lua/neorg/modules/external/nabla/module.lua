@@ -90,16 +90,17 @@ end
 --- numbers, operators, and delimiters are upright (normal weight).
 ---
 --- Type → highlight group (default style):
----   "var"                    → NeorgNablaVar        (italic  — Greek letters / special vars)
----   "sym" (single-char α)   → NeorgNablaSym        (italic  — variable names)
----   "sym" (multi-char α)    → NeorgNablaFun        (bold    — named functions: cos, sin …)
----   "sym" (numeric)         → NeorgNablaNumber     (normal  — numeric symbols)
----   "sym" (other)           → NeorgNablaOperator   (normal  — operator-like, may span rows)
----   "num"                   → NeorgNablaNumber     (normal  — numbers)
----   "op"                    → NeorgNablaOperator   (normal  — multi-row operators)
----   "par"                   → NeorgNablaDelimiter  (normal  — parentheses/brackets)
----   "bf"                    → NeorgNablaBold       (bold    — \mathbf / \boldsymbol)
----   nil   (alphabetic)      → NeorgNablaFun        (bold    — plain functions: min, exp, log)
+---   "var"                    → NeorgNablaVar        (italic      — Greek letters / special vars)
+---   "sym" (single-char α)   → NeorgNablaSym        (italic      — variable names)
+---   "sym" (multi-char α)    → NeorgNablaFun        (bold        — named functions: cos, sin …)
+---   "sym" (numeric)         → NeorgNablaNumber     (normal      — numeric symbols)
+---   "sym" (other)           → NeorgNablaOperator   (normal      — operator-like, may span rows)
+---   "num"                   → NeorgNablaNumber     (normal      — numbers)
+---   "op"                    → NeorgNablaOperator   (normal      — multi-row operators)
+---   "par"                   → NeorgNablaDelimiter  (normal      — parentheses/brackets)
+---   "bf"                    → NeorgNablaBold       (bold        — \mathbf)
+---   "bfit"                  → NeorgNablaBoldItalic (bold+italic — \boldsymbol)
+---   nil   (alphabetic)      → NeorgNablaFun        (bold        — plain functions: min, exp, log)
 ---
 ---@param g          table   grid object from nabla.ascii.to_ascii
 ---@param virt_lines table   array of virt-line arrays (1-indexed rows of {char, hl} tuples)
@@ -155,12 +156,24 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
     end
 
     if g.t == "bf" then
-        -- \mathbf / \boldsymbol content → bold
+        -- \mathbf content → bold (not italic)
         for y = 1, g.h do
             local off = (y + dy == 1) and first_dx or dx
             for i = 1, g.w do
                 if virt_lines[dy + y] and virt_lines[dy + y][off + i] then
                     virt_lines[dy + y][off + i][2] = "NeorgNablaBold"
+                end
+            end
+        end
+    end
+
+    if g.t == "bfit" then
+        -- \boldsymbol content → bold + italic
+        for y = 1, g.h do
+            local off = (y + dy == 1) and first_dx or dx
+            for i = 1, g.w do
+                if virt_lines[dy + y] and virt_lines[dy + y][off + i] then
+                    virt_lines[dy + y][off + i][2] = "NeorgNablaBoldItalic"
                 end
             end
         end
@@ -219,11 +232,11 @@ end
 
 --- Walk the parsed LaTeX AST and collect the content expressions that appear
 --- inside \mathbf{} or \boldsymbol{} commands.  These are the sub-expressions
---- whose rendered grids should receive bold highlighting.
+--- whose rendered grids should receive bold (or bold+italic) highlighting.
 ---
 ---@param exp  table  root expression from nabla.latex.parse_all
----@return table[]    list of content expression nodes
-local function find_bold_content_exps(exp)
+---@return table[]    list of {exp=table, macro=string} entries
+local function find_font_content_exps(exp)
     local result = {}
     if not exp then
         return result
@@ -243,8 +256,8 @@ local function find_bold_content_exps(exp)
                     and (e.sym == "mathbf" or e.sym == "boldsymbol")
                     and i + 1 <= #exps
                 then
-                    table.insert(result, exps[i + 1])
-                    -- recurse into the inner content for nested bold
+                    table.insert(result, { exp = exps[i + 1], macro = e.sym })
+                    -- recurse into the inner content for nested font commands
                     walk(exps[i + 1])
                     i = i + 2
                 else
@@ -270,19 +283,20 @@ local function find_bold_content_exps(exp)
 end
 
 --- Walk the grid tree depth-first and mark nodes whose content and
---- dimensions match one of the `bold_refs` entries by setting `g.t = "bf"`.
+--- dimensions match one of the `font_refs` entries by setting their type
+--- to the corresponding target (e.g. `"bf"` or `"bfit"`).
 --- Matched references are consumed so that each reference matches at most
 --- one grid node (left-to-right order, matching expression order).
 ---
 ---@param g          table    root grid from nabla.ascii.to_ascii
----@param bold_refs  table[]  list of {w, h, content, t} reference grids
-local function mark_bold_grids(g, bold_refs)
-    if #bold_refs == 0 then
+---@param font_refs  table[]  list of {w, h, content, t, target} reference grids
+local function mark_font_grids(g, font_refs)
+    if #font_refs == 0 then
         return
     end
 
     -- Try to match this grid against the first unconsumed reference.
-    for i, ref in ipairs(bold_refs) do
+    for i, ref in ipairs(font_refs) do
         if g.w == ref.w and g.h == ref.h and g.t == ref.t then
             local match = true
             for j = 1, g.h do
@@ -292,8 +306,8 @@ local function mark_bold_grids(g, bold_refs)
                 end
             end
             if match then
-                g.t = "bf"
-                table.remove(bold_refs, i)
+                g.t = ref.target
+                table.remove(font_refs, i)
                 return -- this node is consumed; do not recurse into children
             end
         end
@@ -302,8 +316,8 @@ local function mark_bold_grids(g, bold_refs)
     -- Recurse depth-first (left-to-right) into children.
     if g.children then
         for _, child in ipairs(g.children) do
-            mark_bold_grids(child[1], bold_refs)
-            if #bold_refs == 0 then
+            mark_font_grids(child[1], font_refs)
+            if #font_refs == 0 then
                 return
             end
         end
@@ -461,24 +475,25 @@ local function gen_drawing(content)
         return nil
     end
 
-    -- Mark grid nodes that originate from \mathbf{} / \boldsymbol{} so that
-    -- stylize_virt renders them with bold highlighting.
-    local bold_exps = find_bold_content_exps(exp)
-    if #bold_exps > 0 then
-        local bold_refs = {}
-        for _, bexp in ipairs(bold_exps) do
-            local bok, bg = pcall(ascii_mod.to_ascii, { bexp }, 1)
+    -- Mark grid nodes that originate from \mathbf{} or \boldsymbol{} so that
+    -- stylize_virt renders them with the appropriate bold / bold+italic style.
+    local font_exps = find_font_content_exps(exp)
+    if #font_exps > 0 then
+        local font_refs = {}
+        for _, entry in ipairs(font_exps) do
+            local bok, bg = pcall(ascii_mod.to_ascii, { entry.exp }, 1)
             if bok and bg then
-                table.insert(bold_refs, {
+                table.insert(font_refs, {
                     w = bg.w,
                     h = bg.h,
                     content = bg.content,
                     t = bg.t,
+                    target = entry.macro == "boldsymbol" and "bfit" or "bf",
                 })
             end
         end
-        if #bold_refs > 0 then
-            mark_bold_grids(g, bold_refs)
+        if #font_refs > 0 then
+            mark_font_grids(g, font_refs)
         end
     end
 
@@ -1038,16 +1053,18 @@ module.load = function()
     -- Define highlight groups for LaTeX-style rendering.  Each nabla grid node
     -- type has its own group so users can customise them independently.
     -- The defaults follow standard LaTeX math-mode conventions: variables and
-    -- Greek letters are italic; named functions (cos, sin, …) and \mathbf
-    -- content are bold; numbers, operators, and delimiters are upright.
+    -- Greek letters are italic; named functions (cos, sin, …) are bold;
+    -- \mathbf is bold; \boldsymbol is bold+italic; numbers, operators, and
+    -- delimiters are upright.
     -- Using `default = true` so users can override with their own styles.
-    vim.api.nvim_set_hl(0, "NeorgNablaVar",       { italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaSym",       { italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaFun",       { bold = true,   default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaBold",      { bold = true,   default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaNumber",    { default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaOperator",  { default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaDelimiter", { default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaVar",        { italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaSym",        { italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaFun",        { bold = true,   default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaBold",       { bold = true,   default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaBoldItalic", { bold = true, italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaNumber",     { default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaOperator",   { default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaDelimiter",  { default = true })
 
     -- Register the autocommands neorg should forward to us
     module.required["core.autocommands"].enable_autocommand("BufWinEnter")
