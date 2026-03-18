@@ -40,6 +40,8 @@ requires no external binaries or image protocol support.
                         render_on_enter = false,
                         -- Milliseconds to wait after the last edit before re-rendering (default: 200)
                         debounce_ms = 200,
+                        -- Conceal the @math and @end tag lines when conceallevel >= 2 (default: false)
+                        conceal_math_tags = false,
                     },
                 },
             },
@@ -94,16 +96,3 @@ vim.api.nvim_create_autocmd("FileType", {
 })
 ```
 
-## How it works
-
-1. `core.integrations.treesitter` is used to locate `inline_math` nodes and
-   `ranged_verbatim_tag` nodes whose `tag_name` is `"math"`.
-2. The LaTeX content is extracted (stripping Neorg markers / unescaping where
-   needed) and passed to nabla.nvim's internal parser and ASCII renderer.
-3. For inline math, the formula characters are replaced one-by-one with the
-   corresponding ASCII-art characters using Neovim extmark concealment, and
-   extra rows of the drawing are placed as `virt_lines_above` / `virt_lines`.
-4. For `@math` blocks the drawing is placed as `virt_lines` after the tag line
-   and the raw LaTeX content lines are concealed.  When the cursor moves inside
-   a math block the baseline overlay and content concealment are removed so the
-   original source is visible, while the virtual lines above/below are kept.
