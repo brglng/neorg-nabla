@@ -213,7 +213,7 @@ local function render_inline(buf, node, content)
     local srow, scol, _, ecol = node:range()
 
     -- Compute a padding prefix so that virt_lines above/below the baseline
-    -- are horizontally aligned with the formula at scol.
+    -- are horizontally aligned with the rendered math at scol.
     local line_text = vim.api.nvim_buf_get_lines(buf, srow, srow + 1, false)[1] or ""
     local prefix_width = vim.fn.strdisplaywidth(line_text:sub(1, scol))
     local prefix = string.rep(" ", prefix_width)
