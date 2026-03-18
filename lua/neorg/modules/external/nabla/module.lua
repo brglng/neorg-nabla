@@ -53,6 +53,16 @@ module.private = {
 
     --- Per-buffer debounce timer handles.
     render_timers = {},
+
+    --- Per-buffer list of formula row ranges: { {start_row, end_row}, ... }
+    --- Used to detect whether the cursor is inside a formula region.
+    formula_ranges = {},
+
+    --- Per-buffer last cursor row (0-indexed) seen by the cursor-move handler.
+    last_cursor_row = {},
+
+    --- Autocommand group id for cursor tracking.
+    aug = nil,
 }
 
 -- ─── helpers ──────────────────────────────────────────────────────────────────
@@ -131,6 +141,49 @@ local function gen_drawing(content)
     -- attach the graph object so callers can read g.my (the baseline row)
     drawing._g = g
     return drawing
+end
+
+--- Return true when `row` falls inside any recorded formula range for `buf`.
+local function is_on_formula(buf, row)
+    local ranges = module.private.formula_ranges[buf]
+    if not ranges then
+        return false
+    end
+    for _, r in ipairs(ranges) do
+        if row >= r[1] and row <= r[2] then
+            return true
+        end
+    end
+    return false
+end
+
+--- Called on every cursor row change.  When the cursor enters or leaves a
+--- formula region we re-render so the formula at the cursor is revealed
+--- (skipped) and the previously revealed formula is restored.
+local function handle_cursor_move(buf)
+    if not module.private.do_render then
+        return
+    end
+
+    local ok, pos = pcall(vim.api.nvim_win_get_cursor, 0)
+    if not ok then
+        return
+    end
+    local cursor_row = pos[1] - 1 -- 0-indexed
+
+    local last_row = module.private.last_cursor_row[buf]
+    module.private.last_cursor_row[buf] = cursor_row
+
+    if cursor_row == last_row then
+        return
+    end
+
+    local was_on = last_row ~= nil and is_on_formula(buf, last_row)
+    local now_on = is_on_formula(buf, cursor_row)
+
+    if was_on or now_on then
+        module.public.render(buf)
+    end
 end
 
 -- ─── rendering ────────────────────────────────────────────────────────────────
@@ -353,6 +406,20 @@ module.public = {
         -- Clear stale extmarks first
         vim.api.nvim_buf_clear_namespace(buf, module.private.ns, 0, -1)
 
+        -- Track formula row-ranges so handle_cursor_move knows which rows
+        -- belong to a formula and can trigger a re-render on transitions.
+        module.private.formula_ranges[buf] = {}
+
+        -- Determine the cursor row (0-indexed) so we can skip rendering for
+        -- the formula the cursor is sitting on, revealing the original source.
+        local cursor_row = nil
+        if buf == vim.api.nvim_get_current_buf() then
+            local ok, pos = pcall(vim.api.nvim_win_get_cursor, 0)
+            if ok then
+                cursor_row = pos[1] - 1
+            end
+        end
+
         local ts = module.required["core.integrations.treesitter"]
 
         -- ── inline math: $...$ and $|...|$ ──────────────────────────────
@@ -388,6 +455,14 @@ module.public = {
                     return
                 end
 
+                -- Record range and skip rendering when cursor is on this line
+                -- so the original LaTeX source is visible for editing.
+                local srow = select(1, node:range())
+                table.insert(module.private.formula_ranges[buf], { srow, srow })
+                if cursor_row and cursor_row == srow then
+                    return
+                end
+
                 render_inline(buf, node, content)
             end,
             buf
@@ -405,6 +480,15 @@ module.public = {
                 if query.captures[id] ~= "block" then
                     return
                 end
+
+                -- Record range and skip rendering when cursor is inside the
+                -- block so the original content lines are visible.
+                local srow, _, erow, _ = node:range()
+                table.insert(module.private.formula_ranges[buf], { srow, erow })
+                if cursor_row and cursor_row >= srow and cursor_row <= erow then
+                    return
+                end
+
                 render_math_block(buf, node)
             end,
             buf
@@ -471,6 +555,9 @@ local function disable_rendering()
             module.public.clear(buf)
         end
     end
+    -- Reset cursor tracking state
+    module.private.formula_ranges = {}
+    module.private.last_cursor_row = {}
 end
 
 local function toggle_rendering()
@@ -487,12 +574,28 @@ module.load = function()
     module.private.ns = vim.api.nvim_create_namespace("neorg-nabla")
     module.private.do_render = module.config.public.render_on_enter
     module.private.render_timers = {}
+    module.private.formula_ranges = {}
+    module.private.last_cursor_row = {}
 
     -- Register the autocommands neorg should forward to us
     module.required["core.autocommands"].enable_autocommand("BufWinEnter")
     module.required["core.autocommands"].enable_autocommand("BufReadPost")
     module.required["core.autocommands"].enable_autocommand("InsertLeave")
     module.required["core.autocommands"].enable_autocommand("TextChanged")
+
+    -- Use native autocommands for high-frequency cursor events so we avoid
+    -- the overhead of the Neorg event dispatch on every cursor movement.
+    module.private.aug = vim.api.nvim_create_augroup("neorg-nabla-cursor", { clear = true })
+    vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "InsertEnter" }, {
+        group = module.private.aug,
+        callback = function(args)
+            local buf = args.buf
+            if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].ft ~= "norg" then
+                return
+            end
+            handle_cursor_move(buf)
+        end,
+    })
 
     -- Register `:Neorg nabla [enable|disable|toggle]`
     modules.await("core.neorgcmd", function(neorgcmd)
