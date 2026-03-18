@@ -80,28 +80,65 @@ local function make_virt_line(str, hl)
     return vl
 end
 
---- Place one conceal extmark per byte of the formula range `[scol, scol+width)`.
---- `chars` is an array of replacement strings indexed 1-based; bytes beyond
---- `#chars` are concealed with an empty string (hidden).
-local function place_conceal_extmarks(buf, ns, row, scol, width, chars)
-    for j = 1, width do
-        vim.api.nvim_buf_set_extmark(buf, ns, row, scol + j - 1, {
-            end_row = row,
-            end_col = scol + j,
-            conceal = chars[j] or "",
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
+--- Collect tree-sitter conceal ranges on `row` from highlight queries.
+--- These come from `@conceal` captures with `#set! conceal` directives
+--- (e.g. Neorg's highlights.scm hides bold/italic delimiters this way).
+--- Tree-sitter conceals are NOT visible via `nvim_buf_get_extmarks`, so
+--- they must be queried separately.
+---@return table[]  list of {s=number, e=number, rep=string}
+local function get_ts_conceal_ranges(buf, row)
+    local ranges = {}
+
+    local ok, parser = pcall(vim.treesitter.get_parser, buf)
+    if not ok or not parser then
+        return ranges
     end
+
+    local trees = parser:parse()
+    if not trees or #trees == 0 then
+        return ranges
+    end
+
+    local lang = parser:lang()
+    local ok2, query = pcall(vim.treesitter.query.get, lang, "highlights")
+    if not ok2 or not query then
+        return ranges
+    end
+
+    for id, node, metadata in query:iter_captures(trees[1]:root(), buf, row, row + 1) do
+        local name = query.captures[id]
+        if name == "conceal" then
+            local srow, scol, erow, ecol = node:range()
+            if srow == row and erow == row then
+                local rep = ""
+                if metadata then
+                    -- Neovim stores #set! conceal metadata at different
+                    -- levels depending on the query structure and version:
+                    -- capture-level (metadata[id].conceal) or match-level
+                    -- (metadata.conceal).  Check both.
+                    if type(metadata[id]) == "table" and metadata[id].conceal then
+                        rep = metadata[id].conceal
+                    elseif metadata.conceal then
+                        rep = metadata.conceal
+                    end
+                end
+                table.insert(ranges, { s = scol, e = ecol, rep = rep })
+            end
+        end
+    end
+
+    return ranges
 end
 
 --- Compute the 0-indexed visual (display) column of buffer byte position
---- `byte_col` on `row` in `buf`, accounting for conceal extmarks from
---- every namespace.  This is independent of screen/window state and gives
---- correct results even when other modules apply conceal extmarks (e.g.
---- neorg's core.concealer for bold/italic markers).
-local function visual_col_with_conceal(buf, row, byte_col, line_text)
+--- `byte_col` on `row` in `buf`, accounting for both extmark-based AND
+--- tree-sitter-based conceals.
+---
+--- Extmark conceals are read via `nvim_buf_get_extmarks` (all namespaces).
+--- Tree-sitter conceals (e.g. `@conceal` in highlight queries) are read
+--- via `get_ts_conceal_ranges`.  Passing pre-computed `ts_ranges` avoids
+--- redundant tree-sitter queries when multiple formulas share a line.
+local function visual_col_with_conceal(buf, row, byte_col, line_text, ts_ranges)
     if byte_col <= 0 then
         return 0
     end
@@ -109,9 +146,9 @@ local function visual_col_with_conceal(buf, row, byte_col, line_text)
     -- Collect conceal extmarks from ALL namespaces on this row.
     local marks = vim.api.nvim_buf_get_extmarks(buf, -1, { row, 0 }, { row, -1 }, {
         details = true,
+        overlap = true,
     })
 
-    -- Filter for conceal ranges that overlap with [0, byte_col).
     local ranges = {}
     for _, mark in ipairs(marks) do
         local details = mark[4]
@@ -123,6 +160,19 @@ local function visual_col_with_conceal(buf, row, byte_col, line_text)
                 if e > s then
                     table.insert(ranges, { s = s, e = e, rep = details.conceal })
                 end
+            end
+        end
+    end
+
+    -- Merge tree-sitter conceal ranges.
+    if ts_ranges == nil then
+        ts_ranges = get_ts_conceal_ranges(buf, row)
+    end
+    for _, r in ipairs(ts_ranges) do
+        if r.s < byte_col then
+            local e = math.min(r.e, byte_col)
+            if e > r.s then
+                table.insert(ranges, { s = r.s, e = e, rep = r.rep })
             end
         end
     end
@@ -286,25 +336,30 @@ local function render_inline_group(buf, entries)
     end
 
     -- ── compute visual column for each formula ──────────────────────────
-    -- Compute the 0-indexed visual column of each formula start,
-    -- accounting for conceal extmarks from other modules (e.g. neorg's
-    -- core.concealer that hides bold/italic markers).  This reads
-    -- extmark metadata directly from the buffer and is independent of
-    -- screen/window state, so it is reliable regardless of redraw timing.
+    -- Compute the 0-indexed visual column of each formula start and end,
+    -- accounting for both extmark-based and tree-sitter-based conceals
+    -- from other modules (e.g. neorg's core.concealer for bold/italic
+    -- markers, and @conceal captures in highlight queries that hide
+    -- markup delimiters).  Pre-compute tree-sitter ranges once for the
+    -- whole line to avoid redundant queries.
     -- Wrapped long lines are intentionally not supported because Neovim
     -- cannot insert virtual lines between wrapped screen lines.
+    local ts_ranges = get_ts_conceal_ranges(buf, srow)
     for _, v in ipairs(valid) do
-        v.pre_col = visual_col_with_conceal(buf, srow, v.scol, line_text)
+        v.pre_col = visual_col_with_conceal(buf, srow, v.scol, line_text, ts_ranges)
+        v.post_col = visual_col_with_conceal(buf, srow, v.ecol, line_text, ts_ranges)
     end
 
     -- Post-conceal positions: nabla replaces each formula's source text
     -- with its rendered baseline (which may differ in width), so every
     -- subsequent formula shifts by the cumulative width difference.
+    -- The source width must use the concealed visual width (post_col -
+    -- pre_col) rather than raw strdisplaywidth, because tree-sitter
+    -- conceals (e.g. hidden $ delimiters) reduce the visual width.
     local width_delta = 0
     for _, v in ipairs(valid) do
         v.virt_col = v.pre_col + width_delta
-        local source_width = vim.fn.strdisplaywidth(
-            line_text:sub(v.scol + 1, v.ecol))
+        local source_width = v.post_col - v.pre_col
         width_delta = width_delta
             + vim.fn.strdisplaywidth(v.baseline) - source_width
     end
