@@ -80,6 +80,49 @@ local function make_virt_line(str, hl)
     return vl
 end
 
+--- Walk the grid tree produced by nabla.ascii and apply bold/italic highlight
+--- groups to virt-line entries following common LaTeX rendering conventions.
+---
+--- In LaTeX math mode, variables and Greek letters are set in italic, while
+--- numbers, named operators, and delimiters are upright.  This mirrors the
+--- structure of nabla.nvim's `colorize_virt` but uses formatting (bold/italic)
+--- rather than syntax-highlight colours.
+---
+---@param g          table   grid object from nabla.ascii.to_ascii
+---@param virt_lines table   array of virt-line arrays (1-indexed rows of {char, hl} tuples)
+---@param first_dx   number  column offset on the very first output row
+---@param dx         number  column offset on subsequent rows
+---@param dy         number  row offset
+local function stylize_virt(g, virt_lines, first_dx, dx, dy)
+    if g.t == "var" then
+        -- Greek letters / special variables → italic
+        local off = (dy == 0) and first_dx or dx
+        for i = 1, g.w do
+            if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
+                virt_lines[dy + 1][off + i][2] = "NeorgNablaItalic"
+            end
+        end
+    elseif g.t == "sym" then
+        if g.content and g.content[1] and string.match(g.content[1], "^%a") then
+            -- Alphabetic symbols (variables) → italic
+            local off = (dy == 0) and first_dx or dx
+            for i = 1, g.w do
+                if virt_lines[dy + 1] and virt_lines[dy + 1][off + i] then
+                    virt_lines[dy + 1][off + i][2] = "NeorgNablaItalic"
+                end
+            end
+        end
+        -- Numeric and operator-like symbols stay Normal (upright in LaTeX)
+    end
+    -- "num", "op", "par" all stay Normal (upright in LaTeX)
+
+    if g.children then
+        for _, child in ipairs(g.children) do
+            stylize_virt(child[1], virt_lines, child[2] + first_dx, child[2] + dx, child[3] + dy)
+        end
+    end
+end
+
 --- Collect tree-sitter conceal ranges on `row` from highlight queries.
 --- These come from `@conceal` captures with `#set! conceal` directives
 --- (e.g. Neorg's highlights.scm hides bold/italic delimiters this way).
@@ -251,6 +294,16 @@ local function gen_drawing(content)
 
     -- attach the graph object so callers can read g.my (the baseline row)
     drawing._g = g
+
+    -- Build styled virtual-text lines with bold/italic formatting applied
+    -- according to LaTeX rendering conventions.
+    local virt_lines = {}
+    for j = 1, #drawing do
+        virt_lines[j] = make_virt_line(drawing[j])
+    end
+    stylize_virt(g, virt_lines, 0, 0, 0)
+    drawing._virt_lines = virt_lines
+
     return drawing
 end
 
@@ -375,7 +428,7 @@ local function render_inline_group(buf, entries)
             invalidate = true,
         })
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
-            virt_text = make_virt_line(v.baseline),
+            virt_text = v.drawing._virt_lines[v.main_row + 1] or make_virt_line(v.baseline),
             virt_text_pos = "inline",
             strict = false,
             undo_restore = false,
@@ -395,7 +448,7 @@ local function render_inline_group(buf, entries)
     if max_above > 0 then
         local vlines = {}
         for r = 1, max_above do
-            local parts = {}
+            local combined = {}
             local cur_col = 0
             for _, v in ipairs(valid) do
                 -- Align from the bottom: when r == max_above the
@@ -404,15 +457,18 @@ local function render_inline_group(buf, entries)
                 local draw_r = r - max_above + v.main_row
                 if draw_r >= 1 and draw_r <= v.main_row then
                     local text = v.drawing[draw_r] or ""
+                    local row_virt = v.drawing._virt_lines[draw_r] or {}
                     if v.virt_col > cur_col then
-                        table.insert(parts, string.rep(" ", v.virt_col - cur_col))
+                        for _ = 1, v.virt_col - cur_col do
+                            table.insert(combined, { " ", "Normal" })
+                        end
                         cur_col = v.virt_col
                     end
-                    table.insert(parts, text)
+                    vim.list_extend(combined, row_virt)
                     cur_col = cur_col + vim.fn.strdisplaywidth(text)
                 end
             end
-            table.insert(vlines, make_virt_line(table.concat(parts)))
+            table.insert(vlines, combined)
         end
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
             virt_lines = vlines,
@@ -427,21 +483,24 @@ local function render_inline_group(buf, entries)
     if max_below > 0 then
         local vlines = {}
         for r = 1, max_below do
-            local parts = {}
+            local combined = {}
             local cur_col = 0
             for _, v in ipairs(valid) do
                 local draw_r = v.main_row + 1 + r -- 1-indexed
                 if draw_r <= #v.drawing then
                     local text = v.drawing[draw_r] or ""
+                    local row_virt = v.drawing._virt_lines[draw_r] or {}
                     if v.virt_col > cur_col then
-                        table.insert(parts, string.rep(" ", v.virt_col - cur_col))
+                        for _ = 1, v.virt_col - cur_col do
+                            table.insert(combined, { " ", "Normal" })
+                        end
                         cur_col = v.virt_col
                     end
-                    table.insert(parts, text)
+                    vim.list_extend(combined, row_virt)
                     cur_col = cur_col + vim.fn.strdisplaywidth(text)
                 end
             end
-            table.insert(vlines, make_virt_line(table.concat(parts)))
+            table.insert(vlines, combined)
         end
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
             virt_lines = vlines,
@@ -501,8 +560,12 @@ local function render_math_block(buf, node)
     -- the @math tag line and the first content line).
     if main_row > 0 then
         local vlines = {}
+        local indent_virt = make_virt_line(indent)
         for r = 1, main_row do
-            table.insert(vlines, make_virt_line(indent .. (drawing[r] or "")))
+            local combined = {}
+            vim.list_extend(combined, indent_virt)
+            vim.list_extend(combined, drawing._virt_lines[r] or {})
+            table.insert(vlines, combined)
         end
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
             virt_lines = vlines,
@@ -515,9 +578,11 @@ local function render_math_block(buf, node)
 
     -- Baseline → virt_text overlay at content_row (content line is concealed
     -- so the overlay is the only thing visible there).
-    local main_line = indent .. (drawing[main_row + 1] or "")
+    local main_line_virt = {}
+    vim.list_extend(main_line_virt, make_virt_line(indent))
+    vim.list_extend(main_line_virt, drawing._virt_lines[main_row + 1] or {})
     vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
-        virt_text = make_virt_line(main_line),
+        virt_text = main_line_virt,
         virt_text_pos = "overlay",
         strict = false,
         undo_restore = false,
@@ -527,8 +592,12 @@ local function render_math_block(buf, node)
     -- Rows below baseline → virt_lines at content_row.
     if #drawing > main_row + 1 then
         local vlines = {}
+        local indent_virt = make_virt_line(indent)
         for r = main_row + 2, #drawing do
-            table.insert(vlines, make_virt_line(indent .. (drawing[r] or "")))
+            local combined = {}
+            vim.list_extend(combined, indent_virt)
+            vim.list_extend(combined, drawing._virt_lines[r] or {})
+            table.insert(vlines, combined)
         end
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
             virt_lines = vlines,
@@ -757,6 +826,12 @@ module.load = function()
     module.private.render_timers = {}
     module.private.formula_ranges = {}
     module.private.last_cursor_row = {}
+
+    -- Define highlight groups for LaTeX-style bold/italic rendering.
+    -- Using `default = true` so users can override these with their own colours.
+    vim.api.nvim_set_hl(0, "NeorgNablaItalic", { italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaBold", { bold = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaBoldItalic", { bold = true, italic = true, default = true })
 
     -- Register the autocommands neorg should forward to us
     module.required["core.autocommands"].enable_autocommand("BufWinEnter")
