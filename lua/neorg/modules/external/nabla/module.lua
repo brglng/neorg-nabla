@@ -188,20 +188,15 @@ end
 
 -- ─── rendering ────────────────────────────────────────────────────────────────
 
---- Render an inline math node using a `virt_text` overlay for the baseline
---- row (padded to the full formula width so the original LaTeX source is
---- visually covered), and `virt_lines` / `virt_lines_above` for the rows
---- above and below the baseline respectively.
+--- Render an inline math node using conceal to hide the formula source and
+--- inline `virt_text` to display the rendered drawing at the baseline.
+--- Non-math text on the same line is left as-is and shifts naturally, so no
+--- width padding or overlay is needed.  Rows above and below the baseline
+--- are shown with `virt_lines_above` / `virt_lines` respectively.
 ---
---- `virt_text_hide = true` causes the overlay to disappear when the cursor
---- is on the formula line, revealing the original LaTeX source for editing.
---- Because no conceal marks are placed for single-line drawings the original
---- text is always accessible without needing conceallevel >= 2.
----
---- For multi-line drawings the baseline overlay is supplemented with
---- per-character conceal extmarks (active at conceallevel >= 2) so that the
---- drawing characters remain visible even when the overlay is dismissed at
---- the cursor.
+--- The conceal requires `conceallevel >= 2` to take effect.  When the
+--- cursor is on the formula line the module skips rendering entirely,
+--- revealing the original LaTeX source for editing.
 ---
 ---@param buf    number  buffer handle
 ---@param node   userdata  TSNode for the inline_math
@@ -216,10 +211,9 @@ local function render_inline(buf, node, content)
     local main_row = g.my or 0 -- 0-indexed row in drawing that aligns with source line
 
     local srow, scol, _, ecol = node:range()
-    local formula_width = ecol - scol
 
     -- Compute a padding prefix so that virt_lines above/below the baseline
-    -- are horizontally aligned with the overlay at scol.
+    -- are horizontally aligned with the rendered math at scol.
     local line_text = vim.api.nvim_buf_get_lines(buf, srow, srow + 1, false)[1] or ""
     local prefix_width = vim.fn.strdisplaywidth(line_text:sub(1, scol))
     local prefix = string.rep(" ", prefix_width)
@@ -241,48 +235,28 @@ local function render_inline(buf, node, content)
 
     -- ── baseline ─────────────────────────────────────────────────────────
     local main_line = drawing[main_row + 1] or "" -- 1-indexed
-    local drawing_chars = {}
-    do
-        local n = vim.str_utfindex(main_line)
-        for i = 1, n do
-            local a = vim.str_byteindex(main_line, i - 1)
-            local b = vim.str_byteindex(main_line, i)
-            table.insert(drawing_chars, main_line:sub(a + 1, b))
-        end
-    end
 
-    -- Pad the baseline drawing to the full formula width so the virt_text
-    -- overlay visually covers all original LaTeX characters.
-    local padded_main_line = main_line
-    local display_width = vim.fn.strdisplaywidth(main_line)
-    if display_width < formula_width then
-        padded_main_line = padded_main_line .. string.rep(" ", formula_width - display_width)
-    end
-
-    -- The overlay is always visible at any conceallevel and disappears when
-    -- the cursor is on the formula line (virt_text_hide), revealing the
-    -- original LaTeX source for editing.
+    -- Conceal the formula text so only the inline virtual text is visible
+    -- (requires conceallevel >= 2).
     vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol, {
-        virt_text = make_virt_line(padded_main_line),
-        virt_text_pos = "overlay",
-        virt_text_hide = true,
+        end_row = srow,
+        end_col = ecol,
+        conceal = "",
         strict = false,
         undo_restore = false,
         invalidate = true,
     })
 
-    -- For single-line drawings no conceal marks are needed: the padded
-    -- overlay fully covers the formula.  Skipping them avoids the problem
-    -- where the original text remains hidden (by conceal) even after the
-    -- overlay is dismissed at the cursor.
-    if #drawing == 1 then
-        return
-    end
-
-    -- For multi-line drawings also replace each formula byte with the
-    -- corresponding drawing character via conceal (requires conceallevel >= 2).
-    -- This keeps the baseline visible when the cursor dismisses the overlay.
-    place_conceal_extmarks(buf, module.private.ns, srow, scol, formula_width, drawing_chars)
+    -- Place the rendered drawing as inline virtual text at the formula
+    -- position.  The non-math text on the line is left as-is and shifts
+    -- naturally – no width padding or overlay is needed.
+    vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol, {
+        virt_text = make_virt_line(main_line),
+        virt_text_pos = "inline",
+        strict = false,
+        undo_restore = false,
+        invalidate = true,
+    })
 
     -- ── rows BELOW the baseline ──────────────────────────────────────────
     if #drawing > main_row + 1 then
