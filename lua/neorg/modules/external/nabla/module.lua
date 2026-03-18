@@ -218,11 +218,17 @@ local function render_inline(buf, node, content)
     local srow, scol, _, ecol = node:range()
     local formula_width = ecol - scol
 
+    -- Compute a padding prefix so that virt_lines above/below the baseline
+    -- are horizontally aligned with the overlay at scol.
+    local line_text = vim.api.nvim_buf_get_lines(buf, srow, srow + 1, false)[1] or ""
+    local prefix_width = vim.fn.strdisplaywidth(line_text:sub(1, scol))
+    local prefix = string.rep(" ", prefix_width)
+
     -- ── rows ABOVE the baseline ──────────────────────────────────────────
     if main_row > 0 then
         local vlines = {}
         for r = 1, main_row do -- drawing rows 1..main_row (1-indexed)
-            table.insert(vlines, make_virt_line(drawing[r] or ""))
+            table.insert(vlines, make_virt_line(prefix .. (drawing[r] or "")))
         end
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol, {
             virt_lines = vlines,
@@ -282,7 +288,7 @@ local function render_inline(buf, node, content)
     if #drawing > main_row + 1 then
         local vlines = {}
         for r = main_row + 2, #drawing do
-            table.insert(vlines, make_virt_line(drawing[r] or ""))
+            table.insert(vlines, make_virt_line(prefix .. (drawing[r] or "")))
         end
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol, {
             virt_lines = vlines,
@@ -303,6 +309,12 @@ end
 ---@param node userdata  TSNode for the ranged_verbatim_tag
 local function render_math_block(buf, node)
     local srow, _, erow, _ = node:range()
+
+    -- Detect the indentation of the @math tag line so the rendered ASCII art
+    -- is placed at the same indentation level as the original block.
+    local tag_line = vim.api.nvim_buf_get_lines(buf, srow, srow + 1, false)[1] or ""
+    local indent = tag_line:match("^(%s*)") or ""
+
     -- Lines between @math (srow) and @end (erow), exclusive on both ends.
     local lines = vim.api.nvim_buf_get_lines(buf, srow + 1, erow, false)
 
@@ -337,7 +349,7 @@ local function render_math_block(buf, node)
     if main_row > 0 then
         local vlines = {}
         for r = 1, main_row do
-            table.insert(vlines, make_virt_line(drawing[r] or ""))
+            table.insert(vlines, make_virt_line(indent .. (drawing[r] or "")))
         end
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
             virt_lines = vlines,
@@ -350,7 +362,7 @@ local function render_math_block(buf, node)
 
     -- Baseline → virt_text overlay at content_row (content line is concealed
     -- so the overlay is the only thing visible there).
-    local main_line = drawing[main_row + 1] or ""
+    local main_line = indent .. (drawing[main_row + 1] or "")
     vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
         virt_text = make_virt_line(main_line),
         virt_text_pos = "overlay",
@@ -363,7 +375,7 @@ local function render_math_block(buf, node)
     if #drawing > main_row + 1 then
         local vlines = {}
         for r = main_row + 2, #drawing do
-            table.insert(vlines, make_virt_line(drawing[r] or ""))
+            table.insert(vlines, make_virt_line(indent .. (drawing[r] or "")))
         end
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
             virt_lines = vlines,
