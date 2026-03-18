@@ -214,8 +214,38 @@ local function render_inline(buf, node, content)
 
     -- Compute a padding prefix so that virt_lines above/below the baseline
     -- are horizontally aligned with the rendered math at scol.
-    local line_text = vim.api.nvim_buf_get_lines(buf, srow, srow + 1, false)[1] or ""
-    local prefix_width = vim.fn.strdisplaywidth(line_text:sub(1, scol))
+    --
+    -- We prefer screenpos() because it accounts for conceal and virtual text
+    -- from other modules (e.g. Neorg's own concealer hides bold `*` markers).
+    -- The baseline uses virt_text_pos="inline" which Neovim positions
+    -- correctly, but virt_lines always start at column 0 of the text area
+    -- and need a manual space prefix.
+    local prefix_width
+    local win = vim.fn.bufwinid(buf)
+    if win > 0 then
+        -- screenpos uses 1-indexed lnum and col
+        local sp = vim.fn.screenpos(win, srow + 1, scol + 1)
+        if sp.col > 0 then
+            local wi = vim.fn.getwininfo(win)[1]
+            if wi then
+                -- Detect line wrapping: if the formula is on a continuation
+                -- line, screenpos gives the wrapped column which won't match
+                -- the virt_lines layout.  Fall back in that case.
+                local line_start = vim.fn.screenpos(win, srow + 1, 1)
+                if line_start.row > 0 and sp.row == line_start.row then
+                    local vcol = sp.col - wi.wincol - wi.textoff
+                    if vcol >= 0 then
+                        prefix_width = vcol
+                    end
+                end
+            end
+        end
+    end
+    if not prefix_width then
+        -- Fallback for off-screen lines, wrapped lines, or missing window
+        local line_text = vim.api.nvim_buf_get_lines(buf, srow, srow + 1, false)[1] or ""
+        prefix_width = vim.fn.strdisplaywidth(line_text:sub(1, scol))
+    end
     local prefix = string.rep(" ", prefix_width)
 
     -- ── rows ABOVE the baseline ──────────────────────────────────────────
