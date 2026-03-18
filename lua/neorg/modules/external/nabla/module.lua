@@ -42,6 +42,10 @@ module.config.public = {
 
     --- Milliseconds to wait after the last text change before re-rendering.
     debounce_ms = 200,
+
+    --- When true, the `@math` and `@end` tag lines of math blocks are concealed
+    --- (hidden when conceallevel >= 2).  Default is false.
+    conceal_math_tags = false,
 }
 
 module.private = {
@@ -60,6 +64,9 @@ module.private = {
 
     --- Per-buffer last cursor row (0-indexed) seen by the cursor-move handler.
     last_cursor_row = {},
+
+    --- Per-buffer last cursor column (0-indexed byte) seen by the cursor-move handler.
+    last_cursor_col = {},
 
     --- Autocommand group id for cursor tracking.
     aug = nil,
@@ -544,9 +551,10 @@ local function is_on_formula(buf, row)
     return false
 end
 
---- Called on every cursor row change.  When the cursor enters or leaves a
---- formula region we re-render so the formula at the cursor is revealed
---- (skipped) and the previously revealed formula is restored.
+--- Called on every cursor row/column change.  When the cursor enters or
+--- leaves a formula region we re-render.  In normal mode, column changes on
+--- a formula line also trigger re-render so that per-formula cursor detection
+--- can reveal only the inline math span under the cursor.
 local function handle_cursor_move(buf)
     if not module.private.do_render then
         return
@@ -557,19 +565,33 @@ local function handle_cursor_move(buf)
         return
     end
     local cursor_row = pos[1] - 1 -- 0-indexed
+    local cursor_col = pos[2]     -- 0-indexed byte column
 
     local last_row = module.private.last_cursor_row[buf]
+    local last_col = module.private.last_cursor_col[buf]
     module.private.last_cursor_row[buf] = cursor_row
+    module.private.last_cursor_col[buf] = cursor_col
 
-    if cursor_row == last_row then
+    if cursor_row == last_row and cursor_col == last_col then
         return
     end
 
-    local was_on = last_row ~= nil and is_on_formula(buf, last_row)
-    local now_on = is_on_formula(buf, cursor_row)
-
-    if was_on or now_on then
-        module.public.render(buf)
+    if cursor_row ~= last_row then
+        -- Row changed: re-render if entering or leaving a formula region.
+        local was_on = last_row ~= nil and is_on_formula(buf, last_row)
+        local now_on = is_on_formula(buf, cursor_row)
+        if was_on or now_on then
+            module.public.render(buf)
+        end
+    else
+        -- Same row, column changed.
+        local mode = vim.api.nvim_get_mode().mode
+        local is_insert = mode:sub(1, 1) == "i" or mode:sub(1, 1) == "R"
+        if not is_insert and is_on_formula(buf, cursor_row) then
+            -- Normal mode on a formula line: re-render to update per-formula
+            -- cursor detection for inline math.
+            module.public.render(buf)
+        end
     end
 end
 
@@ -585,9 +607,16 @@ end
 --- The non-baseline rows are combined into shared virt_lines with the
 --- correct horizontal spacing.
 ---
----@param buf     number  buffer handle
----@param entries table   list of {node=TSNode, content=string}, sorted by column
-local function render_inline_group(buf, entries)
+--- When `cursor_col` is non-nil (normal mode, cursor on this line), the
+--- specific inline math span that the cursor is hovering on will NOT be
+--- concealed (its original text is shown), while all other formulas on
+--- the line remain rendered.  Virtual lines (above/below baseline) are
+--- always shown for all formulas regardless of cursor position.
+---
+---@param buf        number       buffer handle
+---@param entries    table        list of {node=TSNode, content=string}, sorted by column
+---@param cursor_col number|nil   cursor byte column (0-indexed) or nil
+local function render_inline_group(buf, entries, cursor_col)
     local srow = select(1, entries[1].node:range())
     local line_text = vim.api.nvim_buf_get_lines(buf, srow, srow + 1, false)[1] or ""
 
@@ -604,6 +633,10 @@ local function render_inline_group(buf, entries)
                 scol = scol,
                 ecol = ecol,
                 baseline = drawing[(drawing._g.my or 0) + 1] or "",
+                -- When cursor_col is provided (normal mode, cursor on this line),
+                -- mark this formula so its baseline stays as original text (not concealed).
+                cursor_on = cursor_col ~= nil
+                    and cursor_col >= scol and cursor_col < ecol,
             })
         end
     end
@@ -632,31 +665,40 @@ local function render_inline_group(buf, entries)
     -- The source width must use the concealed visual width (post_col -
     -- pre_col) rather than raw strdisplaywidth, because tree-sitter
     -- conceals (e.g. hidden $ delimiters) reduce the visual width.
+    -- Formulas under the cursor (cursor_on) are NOT concealed, so their
+    -- source text stays as-is and they contribute no width change.
     local width_delta = 0
     for _, v in ipairs(valid) do
         v.virt_col = v.pre_col + width_delta
         local source_width = v.post_col - v.pre_col
-        width_delta = width_delta
-            + vim.fn.strdisplaywidth(v.baseline) - source_width
+        if not v.cursor_on then
+            width_delta = width_delta
+                + vim.fn.strdisplaywidth(v.baseline) - source_width
+        end
     end
 
     -- ── place conceal + baseline inline virt_text for each formula ──────
+    -- Formulas under the cursor (cursor_on) are left un-concealed so their
+    -- original text is visible, while all other formulas are replaced with
+    -- their rendered baseline.
     for _, v in ipairs(valid) do
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
-            end_row = srow,
-            end_col = v.ecol,
-            conceal = "",
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
-            virt_text = v.drawing._virt_lines[v.main_row + 1] or make_virt_line(v.baseline),
-            virt_text_pos = "inline",
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
+        if not v.cursor_on then
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
+                end_row = srow,
+                end_col = v.ecol,
+                conceal = "",
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
+                virt_text = v.drawing._virt_lines[v.main_row + 1] or make_virt_line(v.baseline),
+                virt_text_pos = "inline",
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
+        end
     end
 
     -- ── determine max rows above / below baseline ──────────────────────
@@ -844,6 +886,31 @@ local function render_math_block(buf, node)
             })
         end
     end
+
+    -- Optionally conceal the @math and @end tag lines as well.
+    if module.config.public.conceal_math_tags then
+        if #tag_line > 0 then
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
+                end_row = srow,
+                end_col = #tag_line,
+                conceal = "",
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
+        end
+        local end_line = vim.api.nvim_buf_get_lines(buf, erow, erow + 1, false)[1] or ""
+        if #end_line > 0 then
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, erow, 0, {
+                end_row = erow,
+                end_col = #end_line,
+                conceal = "",
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
+        end
+    end
 end
 
 -- ─── public API ───────────────────────────────────────────────────────────────
@@ -867,15 +934,19 @@ module.public = {
         -- belong to a formula and can trigger a re-render on transitions.
         module.private.formula_ranges[buf] = {}
 
-        -- Determine the cursor row (0-indexed) so we can skip rendering for
-        -- the formula the cursor is sitting on, revealing the original source.
+        -- Determine cursor position and editing mode.
         local cursor_row = nil
+        local cursor_col = nil
         if buf == vim.api.nvim_get_current_buf() then
             local ok, pos = pcall(vim.api.nvim_win_get_cursor, 0)
             if ok then
                 cursor_row = pos[1] - 1
+                cursor_col = pos[2]
             end
         end
+
+        local mode = vim.api.nvim_get_mode().mode
+        local is_insert = mode:sub(1, 1) == "i" or mode:sub(1, 1) == "R"
 
         local ts = module.required["core.integrations.treesitter"]
 
@@ -915,11 +986,14 @@ module.public = {
                     return
                 end
 
-                -- Record range and skip rendering when cursor is on this line
-                -- so the original LaTeX source is visible for editing.
                 local srow = select(1, node:range())
                 table.insert(module.private.formula_ranges[buf], { srow, srow })
-                if cursor_row and cursor_row == srow then
+
+                -- In insert mode, skip all formulas on the cursor line so the
+                -- original source is visible for editing.
+                -- In normal mode, never skip here; per-formula cursor detection
+                -- is handled inside render_inline_group.
+                if is_insert and cursor_row and cursor_row == srow then
                     return
                 end
 
@@ -938,7 +1012,16 @@ module.public = {
                 local _, b_scol = b.node:range()
                 return a_scol < b_scol
             end)
-            render_inline_group(buf, group)
+            -- In normal mode, pass cursor column so render_inline_group can
+            -- reveal only the specific formula the cursor is hovering on.
+            local line_cursor_col = nil
+            if not is_insert and cursor_row then
+                local srow_first = select(1, group[1].node:range())
+                if cursor_row == srow_first then
+                    line_cursor_col = cursor_col
+                end
+            end
+            render_inline_group(buf, group, line_cursor_col)
         end
 
         -- ── @math ... @end blocks ────────────────────────────────────────
@@ -954,11 +1037,13 @@ module.public = {
                     return
                 end
 
-                -- Record range and skip rendering when cursor is inside the
-                -- block so the original content lines are visible.
                 local srow, _, erow, _ = node:range()
                 table.insert(module.private.formula_ranges[buf], { srow, erow })
-                if cursor_row and cursor_row >= srow and cursor_row <= erow then
+
+                -- In insert mode, skip rendering when the cursor is inside the
+                -- block so the original content lines are visible for editing.
+                -- In normal mode, always render (never hide virtual lines).
+                if is_insert and cursor_row and cursor_row >= srow and cursor_row <= erow then
                     return
                 end
 
@@ -1031,6 +1116,7 @@ local function disable_rendering()
     -- Reset cursor tracking state
     module.private.formula_ranges = {}
     module.private.last_cursor_row = {}
+    module.private.last_cursor_col = {}
 end
 
 local function toggle_rendering()
@@ -1049,6 +1135,7 @@ module.load = function()
     module.private.render_timers = {}
     module.private.formula_ranges = {}
     module.private.last_cursor_row = {}
+    module.private.last_cursor_col = {}
 
     -- Define highlight groups for LaTeX-style rendering.  Each nabla grid node
     -- type has its own group so users can customise them independently.
@@ -1075,7 +1162,7 @@ module.load = function()
     -- Use native autocommands for high-frequency cursor events so we avoid
     -- the overhead of the Neorg event dispatch on every cursor movement.
     module.private.aug = vim.api.nvim_create_augroup("neorg-nabla-cursor", { clear = true })
-    vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "InsertEnter" }, {
+    vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
         group = module.private.aug,
         callback = function(args)
             local buf = args.buf
@@ -1083,6 +1170,21 @@ module.load = function()
                 return
             end
             handle_cursor_move(buf)
+        end,
+    })
+    -- InsertEnter needs an unconditional re-render so the mode change
+    -- (normal→insert) immediately switches to insert-mode behavior
+    -- (hide virtual lines on cursor line).
+    vim.api.nvim_create_autocmd("InsertEnter", {
+        group = module.private.aug,
+        callback = function(args)
+            local buf = args.buf
+            if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].ft ~= "norg" then
+                return
+            end
+            if module.private.do_render then
+                module.public.render(buf)
+            end
         end,
     })
 
