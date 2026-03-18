@@ -104,4 +104,6 @@ vim.api.nvim_create_autocmd("FileType", {
    corresponding ASCII-art characters using Neovim extmark concealment, and
    extra rows of the drawing are placed as `virt_lines_above` / `virt_lines`.
 4. For `@math` blocks the drawing is placed as `virt_lines` after the tag line
-   and the raw LaTeX content lines are concealed.
+   and the raw LaTeX content lines are concealed.  When the cursor moves inside
+   a math block the baseline overlay and content concealment are removed so the
+   original source is visible, while the virtual lines above/below are kept.
