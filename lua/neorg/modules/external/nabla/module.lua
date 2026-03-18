@@ -662,20 +662,29 @@ local function render_inline_group(buf, entries, cursor_col)
         v.post_col = visual_col_with_conceal(buf, srow, v.ecol, line_text, ts_ranges)
     end
 
-    -- Whether the cursor is on this particular source line.  When it is, we
-    -- use virt_text_pos = "overlay" instead of conceal + inline so that
-    -- Neovim's cursor-line conceal reveal does not expose the original text
-    -- of formulas that are not under the cursor.
+    -- Whether the cursor is on this particular source line.
     local is_cursor_line = cursor_col ~= nil
 
     -- On the cursor line Neovim reveals conceals (e.g. `$` delimiters
     -- hidden by tree-sitter @conceal captures) unless `concealcursor`
-    -- includes the current mode.  When conceals are revealed the visual
-    -- columns computed by visual_col_with_conceal are too small — they
-    -- assume the concealed characters are hidden when they are actually
-    -- visible.  In that case, recompute pre_col using raw display widths
-    -- so that the virt_lines (above/below baseline) align correctly with
-    -- the overlay-rendered baselines.
+    -- includes the current mode.
+    --
+    -- cursor_line_conceal_active = true  → conceals ARE honoured on this line
+    --   (concealcursor includes the mode).  We can use the normal
+    --   conceal + inline approach for non-cursor formulas, which gives the
+    --   correct art-width visual representation.
+    --
+    -- cursor_line_conceal_active = false → conceals are REVEALED on this line
+    --   (default, concealcursor is empty).  We fall back to an overlay padded
+    --   to source-width so the formula text is at least hidden, at the cost of
+    --   the formula appearing source-width wide rather than art-width wide.
+    --
+    -- When conceals are revealed the visual columns computed by
+    -- visual_col_with_conceal are too small (they assume concealed characters
+    -- are hidden when they are actually visible), so we also recompute pre_col
+    -- using raw display widths in that case so that virt_lines align correctly
+    -- with the overlay-rendered baselines.
+    local cursor_line_conceal_active = false
     if is_cursor_line then
         local cc = vim.wo.concealcursor or ""
         local mode_char = vim.api.nvim_get_mode().mode:sub(1, 1):lower()
@@ -683,6 +692,8 @@ local function render_inline_group(buf, entries, cursor_col)
             for _, v in ipairs(valid) do
                 v.pre_col = vim.fn.strdisplaywidth(line_text:sub(1, v.scol))
             end
+        else
+            cursor_line_conceal_active = true
         end
     end
 
@@ -694,13 +705,15 @@ local function render_inline_group(buf, entries, cursor_col)
     -- conceals (e.g. hidden $ delimiters) reduce the visual width.
     -- Formulas under the cursor (cursor_on) are NOT concealed, so their
     -- source text stays as-is and they contribute no width change.
-    -- On the cursor line, overlay is used (no width change), so
-    -- width_delta stays 0 for the entire line.
+    -- When the overlay approach is used (cursor line with conceals revealed),
+    -- no width change occurs (overlay doesn't shift subsequent characters),
+    -- so width_delta stays 0.  When conceal+inline is used (non-cursor lines
+    -- or cursor line with conceals active), width_delta is updated normally.
     local width_delta = 0
     for _, v in ipairs(valid) do
         v.virt_col = v.pre_col + width_delta
         local source_width = v.post_col - v.pre_col
-        if not v.cursor_on and not is_cursor_line then
+        if not v.cursor_on and not (is_cursor_line and not cursor_line_conceal_active) then
             width_delta = width_delta
                 + vim.fn.strdisplaywidth(v.baseline) - source_width
         end
@@ -711,18 +724,23 @@ local function render_inline_group(buf, entries, cursor_col)
     -- original text is visible, while all other formulas are replaced with
     -- their rendered baseline.
     --
-    -- On the cursor line we use virt_text_pos = "overlay" (which draws
-    -- over the source characters) rather than conceal + inline.  This
-    -- avoids Neovim's default behaviour of revealing concealed text on the
-    -- cursor line (when concealcursor is empty).  The overlay is padded
-    -- with spaces to cover the full display width of the source text.
+    -- When conceals are active on the cursor line (concealcursor includes the
+    -- current mode), the normal conceal + inline approach is used for
+    -- non-cursor formulas.  This hides the source text and inserts the
+    -- rendered art inline, so each formula occupies exactly the width of its
+    -- rendered ASCII art — which is the desired behaviour.
     --
-    -- On non-cursor lines the established conceal + inline approach is
-    -- used, which correctly replaces the source with the rendered text
-    -- and adjusts the line width.
+    -- When conceals are revealed on the cursor line (concealcursor is empty
+    -- for the current mode, which is the default), we fall back to
+    -- virt_text_pos = "overlay" padded to the full display width of the
+    -- source text.  This avoids Neovim's default behaviour of exposing the
+    -- original text of formulas that are not under the cursor, at the cost
+    -- of the formula appearing source-width wide instead of art-width wide.
+    --
+    -- On non-cursor lines the conceal + inline approach is always used.
     for _, v in ipairs(valid) do
         if not v.cursor_on then
-            if is_cursor_line then
+            if is_cursor_line and not cursor_line_conceal_active then
                 -- Overlay: draw rendered baseline over the source text.
                 local overlay_virt = {}
                 vim.list_extend(overlay_virt,
@@ -744,6 +762,8 @@ local function render_inline_group(buf, entries, cursor_col)
                 })
             else
                 -- Conceal + inline: hide source text and insert rendered baseline.
+                -- Used on non-cursor lines, and on cursor lines when conceals are
+                -- active (concealcursor includes the current mode).
                 vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
                     end_row = srow,
                     end_col = v.ecol,
