@@ -84,18 +84,19 @@ end
 --- virt-line entries following common LaTeX rendering conventions.
 ---
 --- Each nabla grid node type maps to its own highlight group so that users
---- can customise them independently.  The defaults follow standard LaTeX
---- math-mode conventions: variables and Greek letters are *italic*, while
---- numbers, operators, and delimiters are upright (normal weight).
+--- can customise them independently.  The defaults link to standard
+--- tree-sitter capture groups (the same ones nabla.nvim uses) so that
+--- variables, numbers, and operators are visually distinct out of the box
+--- with any colorscheme.
 ---
---- Type → highlight group (default style):
----   "var"               → NeorgNablaVar        (italic — Greek letters / special vars)
----   "sym" (alphabetic)  → NeorgNablaSym        (italic — variable names)
----   "sym" (numeric)     → NeorgNablaNumber     (normal — numeric symbols)
----   "sym" (other)       → NeorgNablaOperator   (normal — operator-like, may span rows)
----   "num"               → NeorgNablaNumber     (normal — numbers)
----   "op"                → NeorgNablaOperator   (normal — multi-row operators)
----   "par"               → NeorgNablaDelimiter  (normal — parentheses/brackets)
+--- Type → highlight group (default link):
+---   "var"               → NeorgNablaVar        (@string   — Greek letters / special vars)
+---   "sym" (alphabetic)  → NeorgNablaSym        (@string   — variable names)
+---   "sym" (numeric)     → NeorgNablaNumber     (@number   — numeric symbols)
+---   "sym" (other)       → NeorgNablaOperator   (@operator — operator-like, may span rows)
+---   "num"               → NeorgNablaNumber     (@number   — numbers)
+---   "op"                → NeorgNablaOperator   (@operator — multi-row operators)
+---   "par"               → NeorgNablaDelimiter  (@operator — parentheses/brackets)
 ---
 ---@param g          table   grid object from nabla.ascii.to_ascii
 ---@param virt_lines table   array of virt-line arrays (1-indexed rows of {char, hl} tuples)
@@ -886,14 +887,15 @@ module.load = function()
 
     -- Define highlight groups for LaTeX-style rendering.  Each nabla grid node
     -- type has its own group so users can customise them independently.
-    -- The defaults follow standard LaTeX math-mode conventions: variables and
-    -- Greek letters are italic; numbers, operators, and delimiters are upright.
+    -- The defaults link to the same standard tree-sitter capture groups that
+    -- nabla.nvim uses (@string, @number, @operator), so variables, numbers
+    -- and operators are visually distinct out of the box with any colorscheme.
     -- Using `default = true` so users can override with their own styles.
-    vim.api.nvim_set_hl(0, "NeorgNablaVar",       { italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaSym",       { italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaNumber",    { default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaOperator",  { default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaDelimiter", { default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaVar",       { link = "@string", default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaSym",       { link = "@string", default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaNumber",    { link = "@number", default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaOperator",  { link = "@operator", default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaDelimiter", { link = "@operator", default = true })
 
     -- Register the autocommands neorg should forward to us
     module.required["core.autocommands"].enable_autocommand("BufWinEnter")
