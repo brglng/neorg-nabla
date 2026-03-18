@@ -830,8 +830,6 @@ module.load = function()
     -- Define highlight groups for LaTeX-style bold/italic rendering.
     -- Using `default = true` so users can override these with their own colours.
     vim.api.nvim_set_hl(0, "NeorgNablaItalic", { italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaBold", { bold = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaBoldItalic", { bold = true, italic = true, default = true })
 
     -- Register the autocommands neorg should forward to us
     module.required["core.autocommands"].enable_autocommand("BufWinEnter")
