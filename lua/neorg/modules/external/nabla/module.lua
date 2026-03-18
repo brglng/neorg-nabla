@@ -70,6 +70,22 @@ local function make_virt_line(str, hl)
     return vl
 end
 
+--- Place one conceal extmark per byte of the formula range `[scol, scol+width)`.
+--- `chars` is an array of replacement strings indexed 1-based; bytes beyond
+--- `#chars` are concealed with an empty string (hidden).
+local function place_conceal_extmarks(buf, ns, row, scol, width, chars)
+    for j = 1, width do
+        vim.api.nvim_buf_set_extmark(buf, ns, row, scol + j - 1, {
+            end_row = row,
+            end_col = scol + j,
+            conceal = chars[j] or "",
+            strict = false,
+            undo_restore = false,
+            invalidate = true,
+        })
+    end
+end
+
 --- Parse the LaTeX `content` with nabla and return the ASCII drawing table,
 --- or `nil` on any failure.  Errors are swallowed so bad formulas are silently
 --- skipped.
@@ -125,6 +141,9 @@ end
 --- >= 2 to take visible effect).  Rows above the baseline are placed as
 --- `virt_lines_above`; rows below as `virt_lines`.
 ---
+--- For single-line drawings (no above/below rows) the drawing is additionally
+--- placed as a `virt_text` overlay so it is visible without conceallevel >= 2.
+---
 ---@param buf    number  buffer handle
 ---@param node   userdata  TSNode for the inline_math
 ---@param content string  stripped LaTeX content (no Neorg markers)
@@ -171,16 +190,27 @@ local function render_inline(buf, node, content)
     -- equals one column here; the drawing chars may be multi-byte UTF-8 but
     -- `conceal` accepts a string so that is fine.
     local formula_width = ecol - scol
-    for j = 1, formula_width do
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol + j - 1, {
-            end_row = srow,
-            end_col = scol + j,
-            conceal = drawing_chars[j] or "",
+
+    -- For single-line drawings there are no virt_lines above or below, so
+    -- character-by-character concealment (which only fires with conceallevel≥2)
+    -- is the sole rendering mechanism – leaving the formula unchanged at lower
+    -- conceallevel values.  Work around this by also placing the drawing as a
+    -- virt_text overlay: the overlay is always visible and the conceal
+    -- additionally hides the raw LaTeX source when conceallevel≥2.
+    if #drawing == 1 then
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, scol, {
+            virt_text = make_virt_line(main_line),
+            virt_text_pos = "overlay",
+            virt_text_hide = true,
             strict = false,
             undo_restore = false,
             invalidate = true,
         })
+        place_conceal_extmarks(buf, module.private.ns, srow, scol, formula_width, {})
+        return
     end
+
+    place_conceal_extmarks(buf, module.private.ns, srow, scol, formula_width, drawing_chars)
 
     -- ── rows BELOW the baseline ──────────────────────────────────────────
     if #drawing > main_row + 1 then
