@@ -609,9 +609,12 @@ end
 ---
 --- When `cursor_col` is non-nil (normal mode, cursor on this line), the
 --- specific inline math span that the cursor is hovering on will NOT be
---- concealed (its original text is shown), while all other formulas on
---- the line remain rendered.  Virtual lines (above/below baseline) are
---- always shown for all formulas regardless of cursor position.
+--- rendered (its original text is shown), while all other formulas on
+--- the line are drawn using `virt_text_pos = "overlay"` so they stay
+--- rendered even when Neovim reveals concealed text on the cursor line.
+--- On non-cursor lines, the established conceal + inline approach is
+--- used instead.  Virtual lines (above/below baseline) are always shown
+--- for all formulas regardless of cursor position.
 ---
 ---@param buf        number       buffer handle
 ---@param entries    table        list of {node=TSNode, content=string}, sorted by column
@@ -659,6 +662,12 @@ local function render_inline_group(buf, entries, cursor_col)
         v.post_col = visual_col_with_conceal(buf, srow, v.ecol, line_text, ts_ranges)
     end
 
+    -- Whether the cursor is on this particular source line.  When it is, we
+    -- use virt_text_pos = "overlay" instead of conceal + inline so that
+    -- Neovim's cursor-line conceal reveal does not expose the original text
+    -- of formulas that are not under the cursor.
+    local is_cursor_line = cursor_col ~= nil
+
     -- Post-conceal positions: nabla replaces each formula's source text
     -- with its rendered baseline (which may differ in width), so every
     -- subsequent formula shifts by the cumulative width difference.
@@ -667,37 +676,72 @@ local function render_inline_group(buf, entries, cursor_col)
     -- conceals (e.g. hidden $ delimiters) reduce the visual width.
     -- Formulas under the cursor (cursor_on) are NOT concealed, so their
     -- source text stays as-is and they contribute no width change.
+    -- On the cursor line, overlay is used (no width change), so
+    -- width_delta stays 0 for the entire line.
     local width_delta = 0
     for _, v in ipairs(valid) do
         v.virt_col = v.pre_col + width_delta
         local source_width = v.post_col - v.pre_col
-        if not v.cursor_on then
+        if not v.cursor_on and not is_cursor_line then
             width_delta = width_delta
                 + vim.fn.strdisplaywidth(v.baseline) - source_width
         end
     end
 
-    -- ── place conceal + baseline inline virt_text for each formula ──────
+    -- ── place baseline rendering for each formula ──────────────────────
     -- Formulas under the cursor (cursor_on) are left un-concealed so their
     -- original text is visible, while all other formulas are replaced with
     -- their rendered baseline.
+    --
+    -- On the cursor line we use virt_text_pos = "overlay" (which draws
+    -- over the source characters) rather than conceal + inline.  This
+    -- avoids Neovim's default behaviour of revealing concealed text on the
+    -- cursor line (when concealcursor is empty).  The overlay is padded
+    -- with spaces to cover the full display width of the source text.
+    --
+    -- On non-cursor lines the established conceal + inline approach is
+    -- used, which correctly replaces the source with the rendered text
+    -- and adjusts the line width.
     for _, v in ipairs(valid) do
         if not v.cursor_on then
-            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
-                end_row = srow,
-                end_col = v.ecol,
-                conceal = "",
-                strict = false,
-                undo_restore = false,
-                invalidate = true,
-            })
-            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
-                virt_text = v.drawing._virt_lines[v.main_row + 1] or make_virt_line(v.baseline),
-                virt_text_pos = "inline",
-                strict = false,
-                undo_restore = false,
-                invalidate = true,
-            })
+            if is_cursor_line then
+                -- Overlay: draw rendered baseline over the source text.
+                local overlay_virt = {}
+                vim.list_extend(overlay_virt,
+                    v.drawing._virt_lines[v.main_row + 1] or make_virt_line(v.baseline))
+                local baseline_width = vim.fn.strdisplaywidth(v.baseline)
+                local source_display_width =
+                    vim.fn.strdisplaywidth(line_text:sub(v.scol + 1, v.ecol))
+                for _ = 1, source_display_width - baseline_width do
+                    table.insert(overlay_virt, { " ", "Normal" })
+                end
+                vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
+                    end_row = srow,
+                    end_col = v.ecol,
+                    virt_text = overlay_virt,
+                    virt_text_pos = "overlay",
+                    strict = false,
+                    undo_restore = false,
+                    invalidate = true,
+                })
+            else
+                -- Conceal + inline: hide source text and insert rendered baseline.
+                vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
+                    end_row = srow,
+                    end_col = v.ecol,
+                    conceal = "",
+                    strict = false,
+                    undo_restore = false,
+                    invalidate = true,
+                })
+                vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
+                    virt_text = v.drawing._virt_lines[v.main_row + 1] or make_virt_line(v.baseline),
+                    virt_text_pos = "inline",
+                    strict = false,
+                    undo_restore = false,
+                    invalidate = true,
+                })
+            end
         end
     end
 
@@ -888,28 +932,24 @@ local function render_math_block(buf, node)
     end
 
     -- Optionally conceal the @math and @end tag lines as well.
+    -- Uses Neovim 0.11 line-level concealing (`conceal_lines`) so that the
+    -- entire screen row disappears (including line number) rather than just
+    -- hiding the tag text.
     if module.config.public.conceal_math_tags then
-        if #tag_line > 0 then
-            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
-                end_row = srow,
-                end_col = #tag_line,
-                conceal = "",
-                strict = false,
-                undo_restore = false,
-                invalidate = true,
-            })
-        end
-        local end_line = vim.api.nvim_buf_get_lines(buf, erow, erow + 1, false)[1] or ""
-        if #end_line > 0 then
-            vim.api.nvim_buf_set_extmark(buf, module.private.ns, erow, 0, {
-                end_row = erow,
-                end_col = #end_line,
-                conceal = "",
-                strict = false,
-                undo_restore = false,
-                invalidate = true,
-            })
-        end
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
+            end_row = srow,
+            conceal_lines = "",
+            strict = false,
+            undo_restore = false,
+            invalidate = true,
+        })
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, erow, 0, {
+            end_row = erow,
+            conceal_lines = "",
+            strict = false,
+            undo_restore = false,
+            invalidate = true,
+        })
     end
 end
 
@@ -1040,10 +1080,10 @@ module.public = {
                 local srow, _, erow, _ = node:range()
                 table.insert(module.private.formula_ranges[buf], { srow, erow })
 
-                -- In insert mode, skip rendering when the cursor is inside the
-                -- block so the original content lines are visible for editing.
-                -- In normal mode, always render (never hide virtual lines).
-                if is_insert and cursor_row and cursor_row >= srow and cursor_row <= erow then
+                -- Skip rendering when the cursor is inside the block so the
+                -- original content lines are visible (for editing in insert
+                -- mode, or for inspecting in normal mode).
+                if cursor_row and cursor_row >= srow and cursor_row <= erow then
                     return
                 end
 
