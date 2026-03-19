@@ -661,6 +661,9 @@ local function render_inline_group(buf, entries, cursor_col)
     -- assume concealed characters are hidden when they are actually
     -- visible), so recompute pre_col using raw display widths so that
     -- virt_lines align correctly with the revealed source text.
+    -- When concealcursor IS active, conceals are honoured on the cursor
+    -- line too, so the existing visual_col_with_conceal values are already
+    -- correct and no recomputation is needed.
     if is_cursor_line then
         local cc = vim.wo.concealcursor or ""
         local mode_char = vim.api.nvim_get_mode().mode:sub(1, 1):lower()
@@ -674,8 +677,10 @@ local function render_inline_group(buf, entries, cursor_col)
     -- ── compute virt_col and place baseline rendering ─────────────────
     if is_cursor_line then
         -- Cursor line: all inline math formulas reveal their raw source text;
-        -- no overlay or conceal is placed.  Virtual lines above/below are
-        -- still rendered (below) to keep the rendered view intact.
+        -- no overlay or conceal is placed.  Since no baseline is replaced,
+        -- every formula occupies its original source width and there is no
+        -- cumulative width delta — virt_col equals pre_col directly.
+        -- Virtual lines above/below are still rendered to keep the view.
         for _, v in ipairs(valid) do
             v.virt_col = v.pre_col
         end
