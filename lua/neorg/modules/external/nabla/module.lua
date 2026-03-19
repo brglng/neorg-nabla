@@ -163,7 +163,9 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
     end
 
     if g.t == "bf" then
-        -- \mathbf content → bold (not italic)
+        -- \mathbf content → bold (not italic).
+        -- Skip children recursion so inner type-specific highlights don't
+        -- overwrite the bold style.
         for y = 1, g.h do
             local off = (y + dy == 1) and first_dx or dx
             for i = 1, g.w do
@@ -172,10 +174,13 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
                 end
             end
         end
+        return
     end
 
     if g.t == "bfit" then
-        -- \boldsymbol content → bold + italic
+        -- \boldsymbol content → bold + italic.
+        -- Skip children recursion so inner type-specific highlights don't
+        -- overwrite the bold+italic style.
         for y = 1, g.h do
             local off = (y + dy == 1) and first_dx or dx
             for i = 1, g.w do
@@ -184,6 +189,7 @@ local function stylize_virt(g, virt_lines, first_dx, dx, dy)
                 end
             end
         end
+        return
     end
 
     if g.t == "op" then
