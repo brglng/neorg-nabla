@@ -602,19 +602,12 @@ end
 --- formula into a single set of virt_lines, so that multiple multi-line
 --- formulas on the same line do not produce redundant blank lines.
 ---
---- Each formula's baseline is still rendered independently as concealed
---- source + inline virtual text, which Neovim positions automatically.
---- The non-baseline rows are combined into shared virt_lines with the
---- correct horizontal spacing.
----
---- When `cursor_col` is non-nil (normal mode, cursor on this line), the
---- specific inline math span that the cursor is hovering on will NOT be
---- rendered (its original text is shown), while all other formulas on
---- the line are drawn using `virt_text_pos = "overlay"` so they stay
---- rendered even when Neovim reveals concealed text on the cursor line.
---- On non-cursor lines, the established conceal + inline approach is
---- used instead.  Virtual lines (above/below baseline) are always shown
---- for all formulas regardless of cursor position.
+--- Each formula's baseline is rendered as concealed source + inline virtual
+--- text on non-cursor lines.  When `cursor_col` is non-nil (normal mode,
+--- cursor on this line), ALL inline math formulas on the line reveal their
+--- raw source text (no overlay or conceal is placed) so the user can
+--- inspect and navigate the LaTeX.  Virtual lines (above/below baseline)
+--- are always rendered for all formulas regardless of cursor position.
 ---
 ---@param buf        number       buffer handle
 ---@param entries    table        list of {node=TSNode, content=string}, sorted by column
@@ -636,10 +629,6 @@ local function render_inline_group(buf, entries, cursor_col)
                 scol = scol,
                 ecol = ecol,
                 baseline = drawing[(drawing._g.my or 0) + 1] or "",
-                -- When cursor_col is provided (normal mode, cursor on this line),
-                -- mark this formula so its baseline stays as original text (not concealed).
-                cursor_on = cursor_col ~= nil
-                    and cursor_col >= scol and cursor_col < ecol,
             })
         end
     end
@@ -667,24 +656,14 @@ local function render_inline_group(buf, entries, cursor_col)
 
     -- On the cursor line Neovim reveals conceals (e.g. `$` delimiters
     -- hidden by tree-sitter @conceal captures) unless `concealcursor`
-    -- includes the current mode.
-    --
-    -- cursor_line_conceal_active = true  → conceals ARE honoured on this line
-    --   (concealcursor includes the mode).  We can use the normal
-    --   conceal + inline approach for non-cursor formulas, which gives the
-    --   correct art-width visual representation.
-    --
-    -- cursor_line_conceal_active = false → conceals are REVEALED on this line
-    --   (default, concealcursor is empty).  We fall back to an overlay padded
-    --   to source-width so the formula text is at least hidden, at the cost of
-    --   the formula appearing source-width wide rather than art-width wide.
-    --
-    -- When conceals are revealed the visual columns computed by
-    -- visual_col_with_conceal are too small (they assume concealed characters
-    -- are hidden when they are actually visible), so we also recompute pre_col
-    -- using raw display widths in that case so that virt_lines align correctly
-    -- with the overlay-rendered baselines.
-    local cursor_line_conceal_active = false
+    -- includes the current mode.  When conceals are revealed the visual
+    -- columns computed by visual_col_with_conceal are too small (they
+    -- assume concealed characters are hidden when they are actually
+    -- visible), so recompute pre_col using raw display widths so that
+    -- virt_lines align correctly with the revealed source text.
+    -- When concealcursor IS active, conceals are honoured on the cursor
+    -- line too, so the existing visual_col_with_conceal values are already
+    -- correct and no recomputation is needed.
     if is_cursor_line then
         local cc = vim.wo.concealcursor or ""
         local mode_char = vim.api.nvim_get_mode().mode:sub(1, 1):lower()
@@ -692,111 +671,47 @@ local function render_inline_group(buf, entries, cursor_col)
             for _, v in ipairs(valid) do
                 v.pre_col = vim.fn.strdisplaywidth(line_text:sub(1, v.scol))
             end
-        else
-            cursor_line_conceal_active = true
         end
     end
 
     -- ── compute virt_col and place baseline rendering ─────────────────
-    -- On the cursor line when conceals are revealed (the common default),
-    -- a single full-line overlay replaces the entire line content.
-    -- Non-cursor formulas are rendered at art-width and the cursor formula
-    -- shows its original source text, so every formula visually occupies
-    -- exactly its rendered width.  virt_col accounts for the cumulative
-    -- width difference so virtual lines (above/below) align correctly.
-    --
-    -- In all other cases (non-cursor lines, or cursor line with conceals
-    -- active via concealcursor) the established conceal + inline approach
-    -- is used: each formula's source text is concealed and replaced by its
-    -- rendered baseline inline, so width changes propagate naturally.
-    if is_cursor_line and not cursor_line_conceal_active then
-        -- ── Branch A: full-line overlay (cursor line, conceals revealed) ──
-        local width_delta = 0
+    if is_cursor_line then
+        -- Cursor line: all inline math formulas reveal their raw source text;
+        -- no overlay or conceal is placed.  Since no baseline is replaced,
+        -- every formula occupies its original source width and there is no
+        -- cumulative width delta — virt_col equals pre_col directly.
+        -- Virtual lines above/below are still rendered to keep the view.
         for _, v in ipairs(valid) do
-            v.virt_col = v.pre_col + width_delta
-            local source_display_width =
-                vim.fn.strdisplaywidth(line_text:sub(v.scol + 1, v.ecol))
-            if not v.cursor_on then
-                width_delta = width_delta
-                    + vim.fn.strdisplaywidth(v.baseline) - source_display_width
-            end
+            v.virt_col = v.pre_col
         end
-
-        -- Build one overlay covering the whole line: text segments between
-        -- formulas are included verbatim; non-cursor formulas contribute
-        -- their rendered baseline; the cursor formula keeps its source text.
-        local overlay_parts = {}
-        local src_pos = 0
-        for _, v in ipairs(valid) do
-            if v.scol > src_pos then
-                vim.list_extend(overlay_parts,
-                    make_virt_line(line_text:sub(src_pos + 1, v.scol)))
-            end
-            if v.cursor_on then
-                vim.list_extend(overlay_parts,
-                    make_virt_line(line_text:sub(v.scol + 1, v.ecol)))
-            else
-                vim.list_extend(overlay_parts,
-                    v.drawing._virt_lines[v.main_row + 1]
-                        or make_virt_line(v.baseline))
-            end
-            src_pos = v.ecol
-        end
-        if src_pos < #line_text then
-            vim.list_extend(overlay_parts,
-                make_virt_line(line_text:sub(src_pos + 1)))
-        end
-
-        -- Pad with spaces so the overlay covers the full source line width
-        -- (otherwise trailing source characters would peek through).
-        local overlay_width = 0
-        for _, p in ipairs(overlay_parts) do
-            overlay_width = overlay_width + vim.fn.strdisplaywidth(p[1])
-        end
-        for _ = 1, vim.fn.strdisplaywidth(line_text) - overlay_width do
-            table.insert(overlay_parts, { " ", "Normal" })
-        end
-
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
-            end_row = srow,
-            end_col = #line_text,
-            virt_text = overlay_parts,
-            virt_text_pos = "overlay",
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
     else
-        -- ── Branch B: conceal + inline (non-cursor lines / conceals active) ──
+        -- Non-cursor lines: conceal source text and replace with rendered
+        -- baseline as inline virtual text.
         local width_delta = 0
         for _, v in ipairs(valid) do
             v.virt_col = v.pre_col + width_delta
             local source_width = v.post_col - v.pre_col
-            if not v.cursor_on then
-                width_delta = width_delta
-                    + vim.fn.strdisplaywidth(v.baseline) - source_width
-            end
+            width_delta = width_delta
+                + vim.fn.strdisplaywidth(v.baseline) - source_width
         end
 
         for _, v in ipairs(valid) do
-            if not v.cursor_on then
-                vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
-                    end_row = srow,
-                    end_col = v.ecol,
-                    conceal = "",
-                    strict = false,
-                    undo_restore = false,
-                    invalidate = true,
-                })
-                vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
-                    virt_text = v.drawing._virt_lines[v.main_row + 1]
-                        or make_virt_line(v.baseline),
-                    virt_text_pos = "inline",
-                    strict = false,
-                    undo_restore = false,
-                    invalidate = true,
-                })
-            end
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
+                end_row = srow,
+                end_col = v.ecol,
+                conceal = "",
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
+                virt_text = v.drawing._virt_lines[v.main_row + 1]
+                    or make_virt_line(v.baseline),
+                virt_text_pos = "inline",
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
         end
     end
 
