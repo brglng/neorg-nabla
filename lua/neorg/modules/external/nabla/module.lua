@@ -697,73 +697,89 @@ local function render_inline_group(buf, entries, cursor_col)
         end
     end
 
-    -- Post-conceal positions: nabla replaces each formula's source text
-    -- with its rendered baseline (which may differ in width), so every
-    -- subsequent formula shifts by the cumulative width difference.
-    -- The source width must use the concealed visual width (post_col -
-    -- pre_col) rather than raw strdisplaywidth, because tree-sitter
-    -- conceals (e.g. hidden $ delimiters) reduce the visual width.
-    -- Formulas under the cursor (cursor_on) are NOT concealed, so their
-    -- source text stays as-is and they contribute no width change.
-    -- When the overlay approach is used (cursor line with conceals revealed),
-    -- no width change occurs (overlay doesn't shift subsequent characters),
-    -- so width_delta stays 0.  When conceal+inline is used (non-cursor lines
-    -- or cursor line with conceals active), width_delta is updated normally.
-    local width_delta = 0
-    for _, v in ipairs(valid) do
-        v.virt_col = v.pre_col + width_delta
-        local source_width = v.post_col - v.pre_col
-        if not v.cursor_on and not (is_cursor_line and not cursor_line_conceal_active) then
-            width_delta = width_delta
-                + vim.fn.strdisplaywidth(v.baseline) - source_width
+    -- ── compute virt_col and place baseline rendering ─────────────────
+    -- On the cursor line when conceals are revealed (the common default),
+    -- a single full-line overlay replaces the entire line content.
+    -- Non-cursor formulas are rendered at art-width and the cursor formula
+    -- shows its original source text, so every formula visually occupies
+    -- exactly its rendered width.  virt_col accounts for the cumulative
+    -- width difference so virtual lines (above/below) align correctly.
+    --
+    -- In all other cases (non-cursor lines, or cursor line with conceals
+    -- active via concealcursor) the established conceal + inline approach
+    -- is used: each formula's source text is concealed and replaced by its
+    -- rendered baseline inline, so width changes propagate naturally.
+    if is_cursor_line and not cursor_line_conceal_active then
+        -- ── Branch A: full-line overlay (cursor line, conceals revealed) ──
+        local width_delta = 0
+        for _, v in ipairs(valid) do
+            v.virt_col = v.pre_col + width_delta
+            local source_display_width =
+                vim.fn.strdisplaywidth(line_text:sub(v.scol + 1, v.ecol))
+            if not v.cursor_on then
+                width_delta = width_delta
+                    + vim.fn.strdisplaywidth(v.baseline) - source_display_width
+            end
         end
-    end
 
-    -- ── place baseline rendering for each formula ──────────────────────
-    -- Formulas under the cursor (cursor_on) are left un-concealed so their
-    -- original text is visible, while all other formulas are replaced with
-    -- their rendered baseline.
-    --
-    -- When conceals are active on the cursor line (concealcursor includes the
-    -- current mode), the normal conceal + inline approach is used for
-    -- non-cursor formulas.  This hides the source text and inserts the
-    -- rendered art inline, so each formula occupies exactly the width of its
-    -- rendered ASCII art — which is the desired behaviour.
-    --
-    -- When conceals are revealed on the cursor line (concealcursor is empty
-    -- for the current mode, which is the default), we fall back to
-    -- virt_text_pos = "overlay" padded to the full display width of the
-    -- source text.  This avoids Neovim's default behaviour of exposing the
-    -- original text of formulas that are not under the cursor, at the cost
-    -- of the formula appearing source-width wide instead of art-width wide.
-    --
-    -- On non-cursor lines the conceal + inline approach is always used.
-    for _, v in ipairs(valid) do
-        if not v.cursor_on then
-            if is_cursor_line and not cursor_line_conceal_active then
-                -- Overlay: draw rendered baseline over the source text.
-                local overlay_virt = {}
-                vim.list_extend(overlay_virt,
-                    v.drawing._virt_lines[v.main_row + 1] or make_virt_line(v.baseline))
-                local baseline_width = vim.fn.strdisplaywidth(v.baseline)
-                local source_display_width =
-                    vim.fn.strdisplaywidth(line_text:sub(v.scol + 1, v.ecol))
-                for _ = 1, source_display_width - baseline_width do
-                    table.insert(overlay_virt, { " ", "Normal" })
-                end
-                vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
-                    end_row = srow,
-                    end_col = v.ecol,
-                    virt_text = overlay_virt,
-                    virt_text_pos = "overlay",
-                    strict = false,
-                    undo_restore = false,
-                    invalidate = true,
-                })
+        -- Build one overlay covering the whole line: text segments between
+        -- formulas are included verbatim; non-cursor formulas contribute
+        -- their rendered baseline; the cursor formula keeps its source text.
+        local overlay_parts = {}
+        local src_pos = 0
+        for _, v in ipairs(valid) do
+            if v.scol > src_pos then
+                vim.list_extend(overlay_parts,
+                    make_virt_line(line_text:sub(src_pos + 1, v.scol)))
+            end
+            if v.cursor_on then
+                vim.list_extend(overlay_parts,
+                    make_virt_line(line_text:sub(v.scol + 1, v.ecol)))
             else
-                -- Conceal + inline: hide source text and insert rendered baseline.
-                -- Used on non-cursor lines, and on cursor lines when conceals are
-                -- active (concealcursor includes the current mode).
+                vim.list_extend(overlay_parts,
+                    v.drawing._virt_lines[v.main_row + 1]
+                        or make_virt_line(v.baseline))
+            end
+            src_pos = v.ecol
+        end
+        if src_pos < #line_text then
+            vim.list_extend(overlay_parts,
+                make_virt_line(line_text:sub(src_pos + 1)))
+        end
+
+        -- Pad with spaces so the overlay covers the full source line width
+        -- (otherwise trailing source characters would peek through).
+        local overlay_width = 0
+        for _, p in ipairs(overlay_parts) do
+            overlay_width = overlay_width + vim.fn.strdisplaywidth(p[1])
+        end
+        for _ = 1, vim.fn.strdisplaywidth(line_text) - overlay_width do
+            table.insert(overlay_parts, { " ", "Normal" })
+        end
+
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
+            end_row = srow,
+            end_col = #line_text,
+            virt_text = overlay_parts,
+            virt_text_pos = "overlay",
+            strict = false,
+            undo_restore = false,
+            invalidate = true,
+        })
+    else
+        -- ── Branch B: conceal + inline (non-cursor lines / conceals active) ──
+        local width_delta = 0
+        for _, v in ipairs(valid) do
+            v.virt_col = v.pre_col + width_delta
+            local source_width = v.post_col - v.pre_col
+            if not v.cursor_on then
+                width_delta = width_delta
+                    + vim.fn.strdisplaywidth(v.baseline) - source_width
+            end
+        end
+
+        for _, v in ipairs(valid) do
+            if not v.cursor_on then
                 vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
                     end_row = srow,
                     end_col = v.ecol,
@@ -773,7 +789,8 @@ local function render_inline_group(buf, entries, cursor_col)
                     invalidate = true,
                 })
                 vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, v.scol, {
-                    virt_text = v.drawing._virt_lines[v.main_row + 1] or make_virt_line(v.baseline),
+                    virt_text = v.drawing._virt_lines[v.main_row + 1]
+                        or make_virt_line(v.baseline),
                     virt_text_pos = "inline",
                     strict = false,
                     undo_restore = false,
@@ -928,9 +945,11 @@ local function render_math_block(buf, node, cursor_inside)
         })
     end
 
-    -- When the cursor is inside the block, skip the baseline overlay and
-    -- content concealment so the original source text is visible for editing.
-    -- The virtual lines above/below are still rendered.
+    -- When the cursor is on a content line, skip the baseline overlay so
+    -- the raw text at srow+1 is visible.  Content lines after the first
+    -- (srow+2 … erow-1) are still concealed; the cursor line is
+    -- automatically revealed by Neovim when concealcursor does not
+    -- include the current mode.
     if not cursor_inside then
         -- Baseline → virt_text overlay at content_row (content line is concealed
         -- so the overlay is the only thing visible there).
@@ -947,6 +966,24 @@ local function render_math_block(buf, node, cursor_inside)
 
         -- Conceal each content line (shows as blank when conceallevel >= 2)
         for r = srow + 1, erow - 1 do
+            local line = vim.api.nvim_buf_get_lines(buf, r, r + 1, false)[1] or ""
+            if #line > 0 then
+                vim.api.nvim_buf_set_extmark(buf, module.private.ns, r, 0, {
+                    end_row = r,
+                    end_col = #line,
+                    conceal = "",
+                    strict = false,
+                    undo_restore = false,
+                    invalidate = true,
+                })
+            end
+        end
+    else
+        -- Cursor is on a content line: skip the baseline overlay so the raw
+        -- text at srow+1 (the baseline position) is visible.  Conceal the
+        -- remaining content lines (srow+2 … erow-1) to keep the rendered
+        -- appearance tidy; the cursor line auto-reveals its conceal.
+        for r = srow + 2, erow - 1 do
             local line = vim.api.nvim_buf_get_lines(buf, r, r + 1, false)[1] or ""
             if #line > 0 then
                 vim.api.nvim_buf_set_extmark(buf, module.private.ns, r, 0, {
@@ -1128,10 +1165,12 @@ module.public = {
                 local srow, _, erow, _ = node:range()
                 table.insert(module.private.formula_ranges[buf], { srow, erow })
 
-                -- When the cursor is inside the block, render the virtual
-                -- lines (above/below) but skip the baseline overlay and
-                -- content concealment so the original source is visible.
-                local cursor_inside = cursor_row ~= nil and cursor_row >= srow and cursor_row <= erow
+                -- When the cursor is on a content line (not the @math or @end
+                -- tag), clear the baseline overlay and reveal the raw text at
+                -- the baseline, while keeping the virtual lines above/below.
+                -- Hovering on the @math or @end tags does NOT reveal the block.
+                local cursor_inside = cursor_row ~= nil
+                    and cursor_row > srow and cursor_row < erow
                 render_math_block(buf, node, cursor_inside)
             end,
             buf
@@ -1214,6 +1253,20 @@ end
 
 -- ─── module.load ─────────────────────────────────────────────────────────────
 
+--- Define (or re-define) the highlight groups used for rendered formulas.
+--- Called on load and again whenever the colorscheme or `background` changes,
+--- since those events clear all highlight groups.
+local function define_highlights()
+    vim.api.nvim_set_hl(0, "NeorgNablaVar",        { italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaSym",        { italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaFun",        { default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaBold",       { bold = true,   default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaBoldItalic", { bold = true, italic = true, default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaNumber",     { default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaOperator",   { default = true })
+    vim.api.nvim_set_hl(0, "NeorgNablaDelimiter",  { default = true })
+end
+
 module.load = function()
     module.private.ns = vim.api.nvim_create_namespace("neorg-nabla")
     module.private.do_render = module.config.public.render_on_enter
@@ -1229,14 +1282,7 @@ module.load = function()
     -- \mathbf is bold; \boldsymbol is bold+italic; numbers, operators, and
     -- delimiters are upright.
     -- Using `default = true` so users can override with their own styles.
-    vim.api.nvim_set_hl(0, "NeorgNablaVar",        { italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaSym",        { italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaFun",        { default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaBold",       { bold = true,   default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaBoldItalic", { bold = true, italic = true, default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaNumber",     { default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaOperator",   { default = true })
-    vim.api.nvim_set_hl(0, "NeorgNablaDelimiter",  { default = true })
+    define_highlights()
 
     -- Register the autocommands neorg should forward to us
     module.required["core.autocommands"].enable_autocommand("BufWinEnter")
@@ -1271,6 +1317,18 @@ module.load = function()
                 module.public.render(buf)
             end
         end,
+    })
+
+    -- Re-define highlights when the colorscheme or background option changes,
+    -- since those events clear all user-defined highlight groups.
+    vim.api.nvim_create_autocmd("ColorScheme", {
+        group = module.private.aug,
+        callback = define_highlights,
+    })
+    vim.api.nvim_create_autocmd("OptionSet", {
+        group = module.private.aug,
+        pattern = "background",
+        callback = define_highlights,
     })
 
     -- Register `:Neorg nabla [enable|disable|toggle]`
