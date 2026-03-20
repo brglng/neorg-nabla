@@ -846,32 +846,29 @@ local function render_math_block(buf, node, cursor_inside)
     -- The drawing baseline aligns with the first content line.
     local content_row = srow + 1
 
-    -- Rows above baseline → virt_lines_above at content_row (appear between
-    -- the @math tag line and the first content line).
-    if main_row > 0 then
-        local vlines = {}
-        local indent_virt = make_virt_line(indent)
-        for r = 1, main_row do
-            local combined = {}
-            vim.list_extend(combined, indent_virt)
-            vim.list_extend(combined, drawing._virt_lines[r] or {})
-            table.insert(vlines, combined)
-        end
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
-            virt_lines = vlines,
-            virt_lines_above = true,
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
-    end
-
-    -- When the cursor is on a content line, skip the baseline overlay so
-    -- the raw text at srow+1 is visible.  Content lines after the first
-    -- (srow+2 … erow-1) are still concealed; the cursor line is
-    -- automatically revealed by Neovim when concealcursor does not
-    -- include the current mode.
+    -- When the cursor is on a content line inside the math block, skip all
+    -- virtual lines and overlays so the raw text is fully revealed.
     if not cursor_inside then
+        -- Rows above baseline → virt_lines_above at content_row (appear between
+        -- the @math tag line and the first content line).
+        if main_row > 0 then
+            local vlines = {}
+            local indent_virt = make_virt_line(indent)
+            for r = 1, main_row do
+                local combined = {}
+                vim.list_extend(combined, indent_virt)
+                vim.list_extend(combined, drawing._virt_lines[r] or {})
+                table.insert(vlines, combined)
+            end
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
+                virt_lines = vlines,
+                virt_lines_above = true,
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
+        end
+
         -- Baseline → virt_text overlay at content_row (content line is concealed
         -- so the overlay is the only thing visible there).
         local main_line_virt = {}
@@ -899,49 +896,32 @@ local function render_math_block(buf, node, cursor_inside)
                 })
             end
         end
-    else
-        -- Cursor is on a content line: skip the baseline overlay so the raw
-        -- text at srow+1 (the baseline position) is visible.  Conceal the
-        -- remaining content lines (srow+2 … erow-1) to keep the rendered
-        -- appearance tidy; the cursor line auto-reveals its conceal.
-        for r = srow + 2, erow - 1 do
-            local line = vim.api.nvim_buf_get_lines(buf, r, r + 1, false)[1] or ""
-            if #line > 0 then
-                vim.api.nvim_buf_set_extmark(buf, module.private.ns, r, 0, {
-                    end_row = r,
-                    end_col = #line,
-                    conceal = "",
-                    strict = false,
-                    undo_restore = false,
-                    invalidate = true,
-                })
-            end
-        end
-    end
 
-    -- Rows below baseline → virt_lines at content_row.
-    if #drawing > main_row + 1 then
-        local vlines = {}
-        local indent_virt = make_virt_line(indent)
-        for r = main_row + 2, #drawing do
-            local combined = {}
-            vim.list_extend(combined, indent_virt)
-            vim.list_extend(combined, drawing._virt_lines[r] or {})
-            table.insert(vlines, combined)
+        -- Rows below baseline → virt_lines at content_row.
+        if #drawing > main_row + 1 then
+            local vlines = {}
+            local indent_virt = make_virt_line(indent)
+            for r = main_row + 2, #drawing do
+                local combined = {}
+                vim.list_extend(combined, indent_virt)
+                vim.list_extend(combined, drawing._virt_lines[r] or {})
+                table.insert(vlines, combined)
+            end
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
+                virt_lines = vlines,
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
         end
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
-            virt_lines = vlines,
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
     end
 
     -- Optionally conceal the @math and @end tag lines as well.
     -- Uses Neovim 0.11 line-level concealing (`conceal_lines`) so that the
     -- entire screen row disappears (including line number) rather than just
-    -- hiding the tag text.
-    if module.config.public.conceal_math_tags then
+    -- hiding the tag text.  Skip when cursor is inside so the full block
+    -- source is visible for editing.
+    if module.config.public.conceal_math_tags and not cursor_inside then
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
             end_row = srow,
             conceal_lines = "",
