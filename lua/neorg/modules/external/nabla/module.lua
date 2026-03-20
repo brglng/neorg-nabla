@@ -919,9 +919,9 @@ local function render_math_block(buf, node, cursor_inside)
     -- Optionally conceal the @math and @end tag lines as well.
     -- Uses Neovim 0.11 line-level concealing (`conceal_lines`) so that the
     -- entire screen row disappears (including line number) rather than just
-    -- hiding the tag text.  Always applied regardless of cursor position so
-    -- tags stay concealed even when editing content inside the block.
-    if module.config.public.conceal_math_tags then
+    -- hiding the tag text.  Skip when cursor is inside so the full block
+    -- source is visible for editing.
+    if module.config.public.conceal_math_tags and not cursor_inside then
         vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
             end_row = srow,
             conceal_lines = "",
