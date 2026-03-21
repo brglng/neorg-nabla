@@ -582,6 +582,18 @@ local function handle_cursor_move(buf)
         return
     end
 
+    -- In visual/select mode, re-render on every cursor move when there are
+    -- formulas in the buffer, since the selection boundary changes.
+    local mode = vim.api.nvim_get_mode().mode
+    local m = mode:sub(1, 1)
+    if m == "v" or m == "V" or m == "\22" or m == "s" or m == "S" or m == "\19" then
+        local ranges = module.private.formula_ranges[buf]
+        if ranges and #ranges > 0 then
+            module.public.render(buf)
+        end
+        return
+    end
+
     if cursor_row ~= last_row then
         -- Row changed: re-render if entering or leaving a formula region.
         local was_on = last_row ~= nil and is_on_formula(buf, last_row)
@@ -591,8 +603,7 @@ local function handle_cursor_move(buf)
         end
     else
         -- Same row, column changed.
-        local mode = vim.api.nvim_get_mode().mode
-        local is_insert = mode:sub(1, 1) == "i" or mode:sub(1, 1) == "R"
+        local is_insert = m == "i" or m == "R"
         if not is_insert and is_on_formula(buf, cursor_row) then
             -- Normal mode on a formula line: re-render to update per-formula
             -- cursor detection for inline math.
@@ -977,6 +988,20 @@ module.public = {
         local mode = vim.api.nvim_get_mode().mode
         local is_insert = mode:sub(1, 1) == "i" or mode:sub(1, 1) == "R"
 
+        -- Detect visual/select mode selection range (0-indexed rows).
+        -- When active, formulas on selected lines are fully revealed.
+        local vis_start, vis_end
+        local m = mode:sub(1, 1)
+        if m == "v" or m == "V" or m == "\22" or m == "s" or m == "S" or m == "\19" then
+            local v_pos = vim.fn.getpos("v")
+            local c_pos = vim.fn.getpos(".")
+            vis_start = v_pos[2] - 1  -- 0-indexed
+            vis_end = c_pos[2] - 1    -- 0-indexed
+            if vis_start > vis_end then
+                vis_start, vis_end = vis_end, vis_start
+            end
+        end
+
         local ts = module.required["core.integrations.treesitter"]
 
         -- ── inline math: $...$ and $|...|$ ──────────────────────────────
@@ -1023,6 +1048,12 @@ module.public = {
                 -- In normal mode, never skip here; per-formula cursor detection
                 -- is handled inside render_inline_group.
                 if is_insert and cursor_row and cursor_row == srow then
+                    return
+                end
+
+                -- In visual/select mode, skip formulas on selected lines so
+                -- the raw source text (including delimiters) is visible.
+                if vis_start and srow >= vis_start and srow <= vis_end then
                     return
                 end
 
@@ -1075,6 +1106,14 @@ module.public = {
                 -- Hovering on the @math or @end tags does NOT reveal the block.
                 local cursor_inside = cursor_row ~= nil
                     and cursor_row > srow and cursor_row < erow
+
+                -- If any part of the block overlaps with the visual selection,
+                -- treat it as cursor-inside to skip all rendering (including
+                -- virtual lines and tag concealment).
+                if vis_start and srow <= vis_end and erow >= vis_start then
+                    cursor_inside = true
+                end
+
                 render_math_block(buf, node, cursor_inside)
             end,
             buf
@@ -1218,6 +1257,30 @@ module.load = function()
                 return
             end
             if module.private.do_render then
+                module.public.render(buf)
+            end
+        end,
+    })
+
+    -- Re-render when entering or leaving visual/select mode so formulas
+    -- on selected lines are revealed / restored.
+    vim.api.nvim_create_autocmd("ModeChanged", {
+        group = module.private.aug,
+        callback = function()
+            local buf = vim.api.nvim_get_current_buf()
+            if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].ft ~= "norg" then
+                return
+            end
+            if not module.private.do_render then
+                return
+            end
+            local old = vim.v.event.old_mode:sub(1, 1)
+            local new = vim.v.event.new_mode:sub(1, 1)
+            local visual_chars = {
+                v = true, V = true, ["\22"] = true,
+                s = true, S = true, ["\19"] = true,
+            }
+            if visual_chars[old] or visual_chars[new] then
                 module.public.render(buf)
             end
         end,
