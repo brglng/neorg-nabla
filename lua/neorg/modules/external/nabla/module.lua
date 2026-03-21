@@ -683,10 +683,8 @@ local function render_inline_group(buf, entries, cursor_col)
     -- ── compute virt_col and place baseline rendering ─────────────────
     if is_cursor_line then
         -- Cursor line: all inline math formulas reveal their raw source text;
-        -- no overlay or conceal is placed.  Since no baseline is replaced,
-        -- every formula occupies its original source width and there is no
-        -- cumulative width delta — virt_col equals pre_col directly.
-        -- Virtual lines above/below are still rendered to keep the view.
+        -- no overlay, conceal, or virtual lines are placed.  The raw source
+        -- is fully visible for inspection and editing.
         for _, v in ipairs(valid) do
             v.virt_col = v.pre_col
         end
@@ -721,78 +719,83 @@ local function render_inline_group(buf, entries, cursor_col)
         end
     end
 
-    -- ── determine max rows above / below baseline ──────────────────────
-    local max_above = 0
-    local max_below = 0
-    for _, v in ipairs(valid) do
-        max_above = math.max(max_above, v.main_row)
-        max_below = math.max(max_below, #v.drawing - v.main_row - 1)
-    end
-
-    -- ── build combined above-baseline virt_lines ───────────────────────
-    if max_above > 0 then
-        local vlines = {}
-        for r = 1, max_above do
-            local combined = {}
-            local cur_col = 0
-            for _, v in ipairs(valid) do
-                -- Align from the bottom: when r == max_above the
-                -- result must equal v.main_row (the row just above the
-                -- baseline).  Solving: draw_r = r - max_above + v.main_row.
-                local draw_r = r - max_above + v.main_row
-                if draw_r >= 1 and draw_r <= v.main_row then
-                    local text = v.drawing[draw_r] or ""
-                    local row_virt = v.drawing._virt_lines[draw_r] or {}
-                    if v.virt_col > cur_col then
-                        for _ = 1, v.virt_col - cur_col do
-                            table.insert(combined, { " ", "Normal" })
-                        end
-                        cur_col = v.virt_col
-                    end
-                    vim.list_extend(combined, row_virt)
-                    cur_col = cur_col + vim.fn.strdisplaywidth(text)
-                end
-            end
-            table.insert(vlines, combined)
+    -- ── virtual lines above / below baseline ──────────────────────────
+    -- When the cursor is on this line, hide all virtual lines so only
+    -- the raw source text is visible (no ASCII art clutter).
+    if not is_cursor_line then
+        -- ── determine max rows above / below baseline ──────────────────
+        local max_above = 0
+        local max_below = 0
+        for _, v in ipairs(valid) do
+            max_above = math.max(max_above, v.main_row)
+            max_below = math.max(max_below, #v.drawing - v.main_row - 1)
         end
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
-            virt_lines = vlines,
-            virt_lines_above = true,
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
-    end
 
-    -- ── build combined below-baseline virt_lines ───────────────────────
-    if max_below > 0 then
-        local vlines = {}
-        for r = 1, max_below do
-            local combined = {}
-            local cur_col = 0
-            for _, v in ipairs(valid) do
-                local draw_r = v.main_row + 1 + r -- 1-indexed
-                if draw_r <= #v.drawing then
-                    local text = v.drawing[draw_r] or ""
-                    local row_virt = v.drawing._virt_lines[draw_r] or {}
-                    if v.virt_col > cur_col then
-                        for _ = 1, v.virt_col - cur_col do
-                            table.insert(combined, { " ", "Normal" })
+        -- ── build combined above-baseline virt_lines ───────────────────
+        if max_above > 0 then
+            local vlines = {}
+            for r = 1, max_above do
+                local combined = {}
+                local cur_col = 0
+                for _, v in ipairs(valid) do
+                    -- Align from the bottom: when r == max_above the
+                    -- result must equal v.main_row (the row just above the
+                    -- baseline).  Solving: draw_r = r - max_above + v.main_row.
+                    local draw_r = r - max_above + v.main_row
+                    if draw_r >= 1 and draw_r <= v.main_row then
+                        local text = v.drawing[draw_r] or ""
+                        local row_virt = v.drawing._virt_lines[draw_r] or {}
+                        if v.virt_col > cur_col then
+                            for _ = 1, v.virt_col - cur_col do
+                                table.insert(combined, { " ", "Normal" })
+                            end
+                            cur_col = v.virt_col
                         end
-                        cur_col = v.virt_col
+                        vim.list_extend(combined, row_virt)
+                        cur_col = cur_col + vim.fn.strdisplaywidth(text)
                     end
-                    vim.list_extend(combined, row_virt)
-                    cur_col = cur_col + vim.fn.strdisplaywidth(text)
                 end
+                table.insert(vlines, combined)
             end
-            table.insert(vlines, combined)
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
+                virt_lines = vlines,
+                virt_lines_above = true,
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
         end
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
-            virt_lines = vlines,
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
+
+        -- ── build combined below-baseline virt_lines ───────────────────
+        if max_below > 0 then
+            local vlines = {}
+            for r = 1, max_below do
+                local combined = {}
+                local cur_col = 0
+                for _, v in ipairs(valid) do
+                    local draw_r = v.main_row + 1 + r -- 1-indexed
+                    if draw_r <= #v.drawing then
+                        local text = v.drawing[draw_r] or ""
+                        local row_virt = v.drawing._virt_lines[draw_r] or {}
+                        if v.virt_col > cur_col then
+                            for _ = 1, v.virt_col - cur_col do
+                                table.insert(combined, { " ", "Normal" })
+                            end
+                            cur_col = v.virt_col
+                        end
+                        vim.list_extend(combined, row_virt)
+                        cur_col = cur_col + vim.fn.strdisplaywidth(text)
+                    end
+                end
+                table.insert(vlines, combined)
+            end
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
+                virt_lines = vlines,
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
+        end
     end
 end
 
