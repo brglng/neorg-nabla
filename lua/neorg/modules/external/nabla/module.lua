@@ -812,7 +812,8 @@ end
 
 --- Render a `@math` block: hide all content lines with Neovim 0.11's
 --- line-level concealing (`conceal_lines`) and attach every drawing row as
---- `virt_lines` to a single content line (the first one).  Because the
+--- `virt_lines` to a line that stays visible (lines hidden by
+--- `conceal_lines` do not draw their attached virt_lines).  Because the
 --- rendered rows are all virtual lines rather than overlays on wrapped
 --- buffer text, the output is unaffected by the `wrap` option.
 ---
@@ -858,9 +859,9 @@ local function render_math_block(buf, node, cursor_inside)
     if not cursor_inside then
         local indent_virt = make_virt_line(indent)
 
-        -- Map all drawing rows to a single content line (the first one) as
-        -- virt_lines placed above it.  Virtual lines are never wrapped, so
-        -- the rendered ASCII art is unaffected by the `wrap` option.
+        -- Build one virt-line per drawing row.  Virtual lines are never
+        -- wrapped, so the rendered ASCII art is unaffected by the `wrap`
+        -- option.
         local vlines = {}
         for r = 1, #drawing do
             local combined = {}
@@ -868,9 +869,30 @@ local function render_math_block(buf, node, cursor_inside)
             vim.list_extend(combined, drawing._virt_lines[r] or {})
             table.insert(vlines, combined)
         end
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow + 1, 0, {
+
+        -- Anchor the virt_lines to a line that stays visible: lines hidden
+        -- with `conceal_lines` are not drawn at all, and neither are any
+        -- virt_lines attached to them.  The content lines are always
+        -- concealed, so use the @math tag line when tags remain visible,
+        -- otherwise a visible neighbouring line outside the block.
+        local conceal_tags = module.config.public.conceal_math_tags
+        local line_count = vim.api.nvim_buf_line_count(buf)
+        local anchor_row, above
+        if not conceal_tags then
+            anchor_row, above = srow, false
+        elseif erow + 1 < line_count then
+            anchor_row, above = erow + 1, true
+        elseif srow > 0 then
+            anchor_row, above = srow - 1, false
+        else
+            -- The block spans the whole buffer, so there is no visible
+            -- neighbouring line; keep the tags visible so the art shows.
+            conceal_tags = false
+            anchor_row, above = srow, false
+        end
+        vim.api.nvim_buf_set_extmark(buf, module.private.ns, anchor_row, 0, {
             virt_lines = vlines,
-            virt_lines_above = true,
+            virt_lines_above = above,
             strict = false,
             undo_restore = false,
             invalidate = true,
@@ -888,28 +910,27 @@ local function render_math_block(buf, node, cursor_inside)
                 invalidate = true,
             })
         end
-    end
 
-    -- Optionally conceal the @math and @end tag lines as well.
-    -- Uses Neovim 0.11 line-level concealing (`conceal_lines`) so that the
-    -- entire screen row disappears (including line number) rather than just
-    -- hiding the tag text.  Skip when cursor is inside so the full block
-    -- source is visible for editing.
-    if module.config.public.conceal_math_tags and not cursor_inside then
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
-            end_row = srow,
-            conceal_lines = "",
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, erow, 0, {
-            end_row = erow,
-            conceal_lines = "",
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
+        -- Optionally conceal the @math and @end tag lines as well.
+        -- Uses Neovim 0.11 line-level concealing (`conceal_lines`) so that
+        -- the entire screen row disappears (including line number) rather
+        -- than just hiding the tag text.
+        if conceal_tags then
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow, 0, {
+                end_row = srow,
+                conceal_lines = "",
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, erow, 0, {
+                end_row = erow,
+                conceal_lines = "",
+                strict = false,
+                undo_restore = false,
+                invalidate = true,
+            })
+        end
     end
 end
 
