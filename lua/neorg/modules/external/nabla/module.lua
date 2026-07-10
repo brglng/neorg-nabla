@@ -823,7 +823,8 @@ end
 ---@param buf  number  buffer handle
 ---@param node userdata  TSNode for the ranged_verbatim_tag
 ---@param cursor_inside boolean  whether the cursor is currently inside this block
-local function render_math_block(buf, node, cursor_inside)
+---@param cursor_row number|nil  0-indexed cursor row, if the buffer is current
+local function render_math_block(buf, node, cursor_inside, cursor_row)
     local srow, _, erow, _ = node:range()
 
     -- Detect the indentation of the @math tag line so the rendered ASCII art
@@ -880,6 +881,11 @@ local function render_math_block(buf, node, cursor_inside)
         local anchor_row, above
         if not conceal_tags then
             anchor_row, above = srow, false
+        elseif cursor_row == erow then
+            -- The cursor sits on the (normally concealed) @end line, which
+            -- Neovim reveals while the cursor is on it.  Anchor the art above
+            -- that line so it does not appear under the current line.
+            anchor_row, above = erow, true
         elseif erow + 1 < line_count then
             anchor_row, above = erow + 1, true
         elseif srow > 0 then
@@ -1095,7 +1101,7 @@ module.public = {
                     cursor_inside = true
                 end
 
-                render_math_block(buf, node, cursor_inside)
+                render_math_block(buf, node, cursor_inside, cursor_row)
             end,
             buf
         )
