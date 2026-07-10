@@ -810,15 +810,16 @@ local function render_inline_group(buf, entries, cursor_col)
     end
 end
 
---- Render a `@math` block: align the ASCII-art drawing so that its baseline
---- row is at the first content line (srow+1).  Rows above the baseline are
---- placed as `virt_lines_above` at that line; the baseline itself is shown
---- as a `virt_text` overlay; rows below the baseline are placed as
---- `virt_lines`.  All content lines are concealed (blank at conceallevel >= 2).
+--- Render a `@math` block: allocate drawing rows to buffer content lines
+--- one-by-one.  Each drawing row is shown as a `virt_text` overlay on the
+--- corresponding content line (whose source text is concealed).  When the
+--- drawing has more rows than there are content lines, the excess rows are
+--- placed as `virt_lines` below the last content line.  When there are more
+--- content lines than drawing rows, the excess content lines are fully
+--- hidden with `conceal_lines` so no blank screen rows remain.
 ---
---- When `cursor_inside` is true the baseline overlay and content-line
---- concealment are skipped so the original source is visible for editing,
---- while the virtual lines above/below are kept.
+--- When `cursor_inside` is true the overlays and concealment are skipped so
+--- the original source is visible for editing.
 ---
 ---@param buf  number  buffer handle
 ---@param node userdata  TSNode for the ranged_verbatim_tag
@@ -854,54 +855,37 @@ local function render_math_block(buf, node, cursor_inside)
         return
     end
 
-    local g = drawing._g
-    local main_row = g.my or 0 -- 0-indexed row in drawing for baseline
-
-    -- The drawing baseline aligns with the first content line.
-    local content_row = srow + 1
+    -- Number of actual content rows in the buffer (between @math and @end)
+    -- and number of rows in the rendered drawing.
+    local n_rows = erow - srow - 1
+    local n_draw = #drawing
 
     -- When the cursor is on a content line inside the math block, skip all
     -- virtual lines and overlays so the raw text is fully revealed.
     if not cursor_inside then
-        -- Rows above baseline → virt_lines_above at content_row (appear between
-        -- the @math tag line and the first content line).
-        if main_row > 0 then
-            local vlines = {}
-            local indent_virt = make_virt_line(indent)
-            for r = 1, main_row do
-                local combined = {}
-                vim.list_extend(combined, indent_virt)
-                vim.list_extend(combined, drawing._virt_lines[r] or {})
-                table.insert(vlines, combined)
-            end
-            vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
-                virt_lines = vlines,
-                virt_lines_above = true,
+        local indent_virt = make_virt_line(indent)
+
+        -- Allocate drawing rows to content lines one-by-one: drawing row i is
+        -- overlaid on content line srow + i, whose source text is concealed.
+        local n_overlay = math.min(n_draw, n_rows)
+        for i = 1, n_overlay do
+            local row = srow + i
+            local virt = {}
+            vim.list_extend(virt, indent_virt)
+            vim.list_extend(virt, drawing._virt_lines[i] or {})
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, row, 0, {
+                virt_text = virt,
+                virt_text_pos = "overlay",
                 strict = false,
                 undo_restore = false,
                 invalidate = true,
             })
-        end
 
-        -- Baseline → virt_text overlay at content_row (content line is concealed
-        -- so the overlay is the only thing visible there).
-        local main_line_virt = {}
-        vim.list_extend(main_line_virt, make_virt_line(indent))
-        vim.list_extend(main_line_virt, drawing._virt_lines[main_row + 1] or {})
-        vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
-            virt_text = main_line_virt,
-            virt_text_pos = "overlay",
-            strict = false,
-            undo_restore = false,
-            invalidate = true,
-        })
-
-        -- Conceal each content line (shows as blank when conceallevel >= 2)
-        for r = srow + 1, erow - 1 do
-            local line = vim.api.nvim_buf_get_lines(buf, r, r + 1, false)[1] or ""
+            -- Conceal the underlying source text so only the overlay is visible.
+            local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
             if #line > 0 then
-                vim.api.nvim_buf_set_extmark(buf, module.private.ns, r, 0, {
-                    end_row = r,
+                vim.api.nvim_buf_set_extmark(buf, module.private.ns, row, 0, {
+                    end_row = row,
                     end_col = #line,
                     conceal = "",
                     strict = false,
@@ -911,22 +895,36 @@ local function render_math_block(buf, node, cursor_inside)
             end
         end
 
-        -- Rows below baseline → virt_lines at content_row.
-        if #drawing > main_row + 1 then
+        -- More drawing rows than content lines → excess rows are placed as
+        -- virt_lines below the last content line.
+        if n_draw > n_rows then
             local vlines = {}
-            local indent_virt = make_virt_line(indent)
-            for r = main_row + 2, #drawing do
+            for r = n_rows + 1, n_draw do
                 local combined = {}
                 vim.list_extend(combined, indent_virt)
                 vim.list_extend(combined, drawing._virt_lines[r] or {})
                 table.insert(vlines, combined)
             end
-            vim.api.nvim_buf_set_extmark(buf, module.private.ns, content_row, 0, {
+            vim.api.nvim_buf_set_extmark(buf, module.private.ns, srow + n_rows, 0, {
                 virt_lines = vlines,
                 strict = false,
                 undo_restore = false,
                 invalidate = true,
             })
+        end
+
+        -- More content lines than drawing rows → fully hide the excess lines
+        -- (entire screen rows disappear) so no blank lines remain.
+        if n_rows > n_draw then
+            for r = srow + n_draw + 1, erow - 1 do
+                vim.api.nvim_buf_set_extmark(buf, module.private.ns, r, 0, {
+                    end_row = r,
+                    conceal_lines = "",
+                    strict = false,
+                    undo_restore = false,
+                    invalidate = true,
+                })
+            end
         end
     end
 
