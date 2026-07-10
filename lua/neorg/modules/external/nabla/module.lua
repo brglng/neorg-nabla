@@ -816,8 +816,8 @@ end
 --- rendered rows are all virtual lines rather than overlays on wrapped
 --- buffer text, the output is unaffected by the `wrap` option.
 ---
---- When `cursor_inside` is true the overlays and concealment are skipped so
---- the original source is visible for editing.
+--- When `cursor_inside` is true the virtual lines and concealment are
+--- skipped so the original source is visible for editing.
 ---
 ---@param buf  number  buffer handle
 ---@param node userdata  TSNode for the ranged_verbatim_tag
